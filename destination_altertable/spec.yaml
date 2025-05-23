@@ -1,0 +1,38 @@
+documentationUrl: https://docs.airbyte.com/integrations/destinations/altertable
+supported_destination_sync_modes:
+  - overwrite
+  - append
+connectionSpecification:
+  $schema: http://json-schema.org/draft-07/schema#
+  type: object
+  required:
+    - host
+    - port
+    - username
+    - password
+    - catalog
+    - schema
+  properties:
+    host:
+      type: string
+      title: Altertable Host
+    port:
+      type: integer
+      default: 8080
+      title: Port
+    username:
+      type: string
+      default: airbyte
+      title: Username
+    password:
+      type: string
+      default: password
+      title: Password
+    catalog:
+      type: string
+      title: Catalog
+      description: The catalog (e.g. `iceberg`, `hive`) to write to.
+    schema:
+      type: string
+      title: Schema
+      description: The schema (e.g. `default`) in the catalog to write to.
