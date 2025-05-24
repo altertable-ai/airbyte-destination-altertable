@@ -17,8 +17,6 @@ class AltertableWriter:
             http_scheme="https",
             verify=False,
         )
-        self.catalog = config["catalog"]
-        self.schema = config["schema"]
         self.config = config
         self.buffer = defaultdict(list)
         self.stream_properties = {}
@@ -34,6 +32,11 @@ class AltertableWriter:
             self.stream_properties[stream_name] = stream.stream.json_schema[
                 "properties"
             ]
+
+    def drop_tables(self):
+        cursor = self.conn.cursor()
+        for stream in self.stream_properties.keys():
+            cursor.execute(f"DROP TABLE IF EXISTS {stream}")
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[record.stream].append(record)
