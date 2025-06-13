@@ -24,6 +24,10 @@ connectionSpecification:
       type: integer
       title: Port
       default: 443
+    http_port:
+      type: integer
+      title: Port
+      default: 3000
     username:
       type: string
       title: Username
