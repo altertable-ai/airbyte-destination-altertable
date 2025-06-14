@@ -7,7 +7,17 @@ import io
 import requests
 from typing import Dict, Any
 from collections import defaultdict
-from airbyte_cdk.models import AirbyteRecordMessage, ConfiguredAirbyteCatalog
+from enum import Enum
+from airbyte_cdk.models import (
+    AirbyteRecordMessage,
+    ConfiguredAirbyteCatalog,
+    DestinationSyncMode,
+)
+
+
+class ParquetUploaderMode(Enum):
+    append = "append"
+    append_dedup = "append_dedup"
 
 
 class ParquetUploader:
@@ -27,13 +37,20 @@ class ParquetUploader:
         self.catalog = catalog
         self.schema = schema
 
-    def upload(self, table: str, buffer: io.BytesIO):
+    def upload(
+        self,
+        table: str,
+        buffer: io.BytesIO,
+        mode: ParquetUploaderMode,
+        primary_key: str | None,
+    ):
         params = {
             "catalog": self.catalog,
             "schema": self.schema,
             "table": table,
             "format": "parquet",
-            "mode": "append",
+            "mode": mode.value,
+            "primary_key": primary_key,
         }
 
         headers = {
@@ -50,6 +67,16 @@ class ParquetUploader:
                 f"Failed to upload parquet: {e.response.status_code} {e.response.text}"
             )
             raise
+
+
+def get_primary_key(primary_key: list[list[str]] | None) -> str | None:
+    if primary_key is None:
+        return None
+    if len(primary_key) > 1:
+        raise NotImplementedError("Composite primary keys are not supported yet")
+    if len(primary_key[0]) > 1:
+        raise NotImplementedError("Nested primary keys are not supported yet")
+    return primary_key[0][0]
 
 
 class AltertableWriter:
@@ -74,24 +101,29 @@ class AltertableWriter:
         )
         self.config = config
         self.buffer = defaultdict(list)
-        self.stream_properties = {}
+        self.streams = {}
+
+    def set_catalog(self, catalog: ConfiguredAirbyteCatalog):
+        for stream in catalog.streams:
+            stream_name = stream.stream.name
+            self.streams[stream_name] = {
+                "properties": stream.stream.json_schema["properties"],
+                "sync_mode": stream.destination_sync_mode,
+                "primary_key": get_primary_key(
+                    stream.primary_key or stream.stream.source_defined_primary_key
+                ),
+            }
 
     def test_connection(self):
         cursor = self.conn.cursor()
         cursor.execute("SELECT 1")
         cursor.fetchone()
 
-    def set_catalog(self, catalog: ConfiguredAirbyteCatalog):
-        for stream in catalog.streams:
-            stream_name = stream.stream.name
-            self.stream_properties[stream_name] = stream.stream.json_schema[
-                "properties"
-            ]
-
-    def drop_tables(self):
+    def drop_tables_if_overwrite(self):
         cursor = self.conn.cursor()
-        for stream in self.stream_properties.keys():
-            cursor.execute(f"DROP TABLE IF EXISTS {stream}")
+        for stream, params in self.streams.items():
+            if params["sync_mode"] == DestinationSyncMode.overwrite:
+                cursor.execute(f"DROP TABLE IF EXISTS {stream}")
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[record.stream].append(record)
@@ -99,8 +131,8 @@ class AltertableWriter:
     def _create_table_if_not_exists(self, stream: str):
         columns = []
 
-        for field, definition in self.stream_properties[stream].items():
-            airbyte_type = definition.get("type")
+        for field, property in self.streams[stream]["properties"].items():
+            airbyte_type = property.get("type")
             iceberg_type = self._airbyte_type_to_iceberg_type(airbyte_type)
             columns.append(f"{field} {iceberg_type}")
 
@@ -134,8 +166,8 @@ class AltertableWriter:
     ) -> io.BytesIO:
         schema = pa.schema(
             [
-                (field, self._airbyte_type_to_arrow_type(definition.get("type")))
-                for field, definition in self.stream_properties[stream].items()
+                (field, self._airbyte_type_to_arrow_type(property.get("type")))
+                for field, property in self.streams[stream]["properties"].items()
             ]
         )
         rows = [
@@ -156,6 +188,17 @@ class AltertableWriter:
             self._create_table_if_not_exists(stream)
 
             buffer = self._convert_records_to_parquet(stream, records)
-            self.parquet_uploader.upload(stream, buffer)
+            params = self.streams[stream]
+            sync_mode = (
+                ParquetUploaderMode.append_dedup
+                if params["sync_mode"] == DestinationSyncMode.append_dedup
+                else ParquetUploaderMode.append
+            )
+            self.parquet_uploader.upload(
+                stream,
+                buffer,
+                sync_mode,
+                params["primary_key"],
+            )
 
         self.buffer.clear()

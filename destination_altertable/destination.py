@@ -69,8 +69,7 @@ class DestinationAltertable(Destination):
     ) -> Iterable[Union[AirbyteMessage, AirbyteStateMessage]]:
         writer = AltertableWriter(config)
         writer.set_catalog(configured_catalog)
-        # FIXME: only do if sync mode is overwrite
-        writer.drop_tables()
+        writer.drop_tables_if_overwrite()
 
         for message in input_messages:
             if message.type == Type.RECORD:
