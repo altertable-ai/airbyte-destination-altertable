@@ -16,6 +16,7 @@ connectionSpecification:
     - password
     - catalog
     - schema
+    - verify_ssl_certificate
   properties:
     host:
       type: string
@@ -27,8 +28,7 @@ connectionSpecification:
       default: 443
     http_port:
       type: integer
-      title: HTTP port
-      default: 15000
+      title: HTTP Port
     username:
       type: string
       title: Username
@@ -43,3 +43,7 @@ connectionSpecification:
     schema:
       type: string
       title: Schema
+    verify_ssl_certificate:
+      type: boolean
+      title: Verify SSL Certificate
+      default: true

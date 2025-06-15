@@ -25,17 +25,21 @@ class ParquetUploader:
         self,
         host: str,
         port: int,
+        http_port: int | None,
         catalog: str,
         schema: str,
         username: str,
         password: str,
+        verify: bool,
     ):
         auth_str = f"{username}:{password}"
         auth_bytes = auth_str.encode("ascii")
         self.base64_auth = base64.b64encode(auth_bytes).decode("ascii")
-        self.url = f"http://{host}:{port}/upload"
+        scheme = "http" if http_port else "https"
+        self.url = f"{scheme}://{host}:{http_port or port}/upload"
         self.catalog = catalog
         self.schema = schema
+        self.verify = verify
 
     def upload(
         self,
@@ -59,7 +63,11 @@ class ParquetUploader:
 
         try:
             response = requests.post(
-                self.url, params=params, headers=headers, data=buffer
+                self.url,
+                params=params,
+                headers=headers,
+                data=buffer,
+                verify=self.verify,
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
@@ -89,15 +97,17 @@ class AltertableWriter:
             catalog=config["catalog"],
             schema=config["schema"],
             http_scheme="https",
-            verify=False,
+            verify=config["verify_ssl_certificate"],
         )
         self.parquet_uploader = ParquetUploader(
             host=config["host"],
-            port=config.get("http_port", config["port"]),
+            port=config["port"],
+            http_port=config.get("http_port"),
             catalog=config["catalog"],
             schema=config["schema"],
             username=config["username"],
             password=config["password"],
+            verify=config["verify_ssl_certificate"],
         )
         self.config = config
         self.buffer = defaultdict(list)
