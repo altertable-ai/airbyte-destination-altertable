@@ -1,0 +1,7 @@
+{
+  "host": "172.24.0.8",
+  "port": 5432,
+  "database": "altertable_development",
+  "username": "admin",
+  "password": "password"
+}
