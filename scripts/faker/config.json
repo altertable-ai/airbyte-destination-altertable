@@ -1,0 +1,7 @@
+{
+  "count": 1000000,
+  "seed": 42,
+  "records_per_slice": 50000,
+  "always_updated": true,
+  "parallelism": 4
+}
