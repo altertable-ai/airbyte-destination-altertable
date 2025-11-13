@@ -1,23 +1,22 @@
 import io
-import orjson
-
-from typing import Any, Mapping, Iterable, Union, cast
-from typing_extensions import override
 from dataclasses import dataclass
-from serpyco_rs import Serializer
 from logging import getLogger
+from typing import Any, Iterable, Mapping, Union, cast
 
+import orjson
 from airbyte_cdk.destinations import Destination
 from airbyte_cdk.exception_handler import init_uncaught_exception_handler
-from airbyte_cdk.models.airbyte_protocol_serializers import custom_type_resolver
 from airbyte_cdk.models import (
     AirbyteConnectionStatus,
-    ConfiguredAirbyteCatalog,
     AirbyteMessage,
     AirbyteStateMessage,
-    Type,
+    ConfiguredAirbyteCatalog,
     Status,
+    Type,
 )
+from airbyte_cdk.models.airbyte_protocol_serializers import custom_type_resolver
+from serpyco_rs import Serializer
+from typing_extensions import override
 
 from .altertable_writer import AltertableWriter
 
@@ -55,8 +54,8 @@ PatchedAirbyteMessageSerializer = Serializer(
 class DestinationAltertable(Destination):
     def check(self, logger, config: Mapping[str, Any]) -> AirbyteConnectionStatus:
         try:
-            writer = AltertableWriter(config)
-            writer.test_connection()
+            with AltertableWriter(config) as writer:
+                writer.test_connection()
             return AirbyteConnectionStatus(status=Status.SUCCEEDED)
         except Exception as e:
             return AirbyteConnectionStatus(status=Status.FAILED, message=str(e))
@@ -67,18 +66,14 @@ class DestinationAltertable(Destination):
         configured_catalog: ConfiguredAirbyteCatalog,
         input_messages: Iterable[AirbyteMessage],
     ) -> Iterable[Union[AirbyteMessage, AirbyteStateMessage]]:
-        writer = AltertableWriter(config)
-        writer.set_catalog(configured_catalog)
-        writer.drop_tables_if_overwrite()
-
-        for message in input_messages:
-            if message.type == Type.RECORD:
-                writer.buffer_record(message.record)
-            elif message.type == Type.STATE:
-                writer.flush()
-                yield message
-
-        writer.flush()
+        with AltertableWriter(config) as writer:
+            writer.set_streams(configured_catalog)
+            for message in input_messages:
+                if message.type == Type.RECORD:
+                    writer.buffer_record(message.record)
+                elif message.type == Type.STATE:
+                    writer.flush()
+                    yield message
 
     @override
     def run(self, args: list[str]) -> None:

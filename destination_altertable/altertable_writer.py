@@ -1,169 +1,97 @@
-import trino
 import base64
 import json
-import pyarrow as pa
-import pyarrow.parquet as pq
-import io
-import requests
-from typing import Dict, Any
 from collections import defaultdict
-from enum import Enum
+from dataclasses import dataclass
+from typing import Any, Dict
+
+import pyarrow as pa
+import pyarrow.flight
+import pyarrow.ipc as ipc
 from airbyte_cdk.models import (
     AirbyteRecordMessage,
     ConfiguredAirbyteCatalog,
     DestinationSyncMode,
 )
+from google.protobuf.any_pb2 import Any as ProtobufAny
+
+from destination_altertable import arrow_flight_sql_definitions
 
 
-class ParquetUploaderMode(Enum):
-    append = "append"
-    append_dedup = "append_dedup"
-
-
-class ParquetUploader:
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        http_port: int | None,
-        catalog: str,
-        schema: str,
-        username: str,
-        password: str,
-        verify: bool,
-    ):
-        auth_str = f"{username}:{password}"
-        auth_bytes = auth_str.encode("ascii")
-        self.base64_auth = base64.b64encode(auth_bytes).decode("ascii")
-        scheme = "http" if http_port else "https"
-        self.url = f"{scheme}://{host}:{http_port or port}/upload"
-        self.catalog = catalog
-        self.schema = schema
-        self.verify = verify
-
-    def upload(
-        self,
-        table: str,
-        buffer: io.BytesIO,
-        mode: ParquetUploaderMode,
-        primary_key: str | None,
-    ):
-        params = {
-            "catalog": self.catalog,
-            "schema": self.schema,
-            "table": table,
-            "format": "parquet",
-            "mode": mode.value,
-            "primary_key": primary_key,
-        }
-
-        headers = {
-            "Authorization": f"Basic {self.base64_auth}",
-        }
-
-        try:
-            response = requests.post(
-                self.url,
-                params=params,
-                headers=headers,
-                data=buffer,
-                verify=self.verify,
-            )
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            print(
-                f"Failed to upload parquet: {e.response.status_code} {e.response.text}"
-            )
-            raise
-
-
-def get_primary_key(primary_key: list[list[str]] | None) -> str | None:
-    if primary_key is None:
-        return None
-    if len(primary_key) > 1:
-        raise NotImplementedError("Composite primary keys are not supported yet")
-    if len(primary_key[0]) > 1:
-        raise NotImplementedError("Nested primary keys are not supported yet")
-    return primary_key[0][0]
+@dataclass(frozen=True)
+class AirbyteStream:
+    name: str
+    properties: dict[str, Any]
+    sync_mode: DestinationSyncMode
+    primary_key: list[list[str]] | None = None
 
 
 class AltertableWriter:
     def __init__(self, config: Dict[str, Any]):
-        self.conn = trino.dbapi.connect(
-            host=config["host"],
-            port=config["port"],
-            user=config["username"],
-            auth=trino.auth.BasicAuthentication(config["username"], config["password"]),
-            catalog=config["catalog"],
-            schema=config["schema"],
-            http_scheme="https",
-            verify=config["verify_ssl_certificate"],
-        )
-        self.parquet_uploader = ParquetUploader(
-            host=config["host"],
-            port=config["port"],
-            http_port=config.get("http_port"),
-            catalog=config["catalog"],
-            schema=config["schema"],
-            username=config["username"],
-            password=config["password"],
-            verify=config["verify_ssl_certificate"],
-        )
-        self.config = config
-        self.buffer = defaultdict(list)
-        self.streams = {}
+        scheme = "grpc+tls" if config.get("tls", True) else "grpc"
+        location = f"{scheme}://{config['host']}:{config['port']}"
 
-    def set_catalog(self, catalog: ConfiguredAirbyteCatalog):
-        for stream in catalog.streams:
-            stream_name = stream.stream.name
-            self.streams[stream_name] = {
-                "properties": stream.stream.json_schema["properties"],
-                "sync_mode": stream.destination_sync_mode,
-                "primary_key": get_primary_key(
-                    stream.primary_key or stream.stream.source_defined_primary_key
-                ),
+        self.config = config
+        self.client = pyarrow.flight.FlightClient(location)
+        self.auth_header = self._get_auth_header(config["username"], config["password"])
+        self.buffer = defaultdict(list)
+        self.streams: Dict[str, AirbyteStream] = {}
+
+    def __enter__(self):
+        """Enter context manager"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager and close client"""
+        self.close()
+        return False
+
+    def close(self):
+        """Close the Flight client connection"""
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass  # Ignore errors on close
+
+    @classmethod
+    def _get_auth_header(cls, username, password) -> str:
+        """Generate basic auth header value"""
+        credentials = f"{username}:{password}"
+        encoded = base64.b64encode(credentials.encode()).decode()
+        return f"Bearer {encoded}".encode()
+
+    def set_streams(self, catalog: ConfiguredAirbyteCatalog):
+        self.streams.update(
+            {
+                stream.stream.name: AirbyteStream(
+                    name=stream.stream.name,
+                    properties=stream.stream.json_schema["properties"],
+                    sync_mode=stream.destination_sync_mode,
+                    primary_key=self._get_primary_key(
+                        stream.primary_key or stream.stream.source_defined_primary_key
+                    ),
+                )
+                for stream in catalog.streams
             }
+        )
 
     def test_connection(self):
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT 1")
-        cursor.fetchone()
-
-    def drop_tables_if_overwrite(self):
-        cursor = self.conn.cursor()
-        for stream, params in self.streams.items():
-            if params["sync_mode"] == DestinationSyncMode.overwrite:
-                cursor.execute(f"DROP TABLE IF EXISTS {stream}")
+        list(self.client.list_actions())
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[record.stream].append(record)
 
-    def _create_table_if_not_exists(self, stream: str):
-        columns = []
+    def _get_primary_key(self, primary_key: list[list[str]] | None) -> list[str] | None:
+        if primary_key is None:
+            return None
+        if any(len(pkey) > 1 for pkey in primary_key):
+            raise NotImplementedError("Nested primary keys are not supported yet")
+        return [pkey[0] for pkey in primary_key]
 
-        for field, property in self.streams[stream]["properties"].items():
-            airbyte_type = property.get("type")
-            iceberg_type = self._airbyte_type_to_iceberg_type(airbyte_type)
-            columns.append(f"{field} {iceberg_type}")
-
-        columns_sql = ", ".join(columns)
-        query = f"CREATE TABLE IF NOT EXISTS {stream} ({columns_sql})"
-        cursor = self.conn.cursor()
-        cursor.execute(query)
-
-    def _airbyte_type_to_iceberg_type(self, airbyte_type: str) -> str:
+    def _airbyte_type_to_arrow_type(self, airbyte_type: str) -> pa.DataType:
         if isinstance(airbyte_type, list):
-            airbyte_type = [t for t in airbyte_type if t != "null"][0]
-        return {
-            "string": "VARCHAR",
-            "integer": "BIGINT",
-            "number": "DOUBLE",
-            "boolean": "BOOLEAN",
-        }.get(airbyte_type, "VARCHAR")
+            airbyte_type = next((t for t in airbyte_type if t != "null"))
 
-    def _airbyte_type_to_arrow_type(self, airbyte_type: str) -> str:
-        if isinstance(airbyte_type, list):
-            airbyte_type = [t for t in airbyte_type if t != "null"][0]
         return {
             "string": pa.string(),
             "integer": pa.int64(),
@@ -171,44 +99,105 @@ class AltertableWriter:
             "boolean": pa.bool_(),
         }.get(airbyte_type, pa.string())
 
-    def _convert_records_to_parquet(
+    def _convert_records_to_pyarrow_table(
         self, stream: str, records: list[AirbyteRecordMessage]
-    ) -> io.BytesIO:
+    ) -> pa.Table:
         schema = pa.schema(
             [
                 (field, self._airbyte_type_to_arrow_type(property.get("type")))
-                for field, property in self.streams[stream]["properties"].items()
+                for field, property in self.streams[stream].properties.items()
             ]
         )
         rows = [
             {k: json.dumps(v) if isinstance(v, dict) else v for k, v in r.data.items()}
             for r in records
         ]
-        table = pa.Table.from_pylist(rows, schema=schema)
-        buffer = io.BytesIO()
-        pq.write_table(table, buffer)
-        buffer.seek(0)
-        return buffer
+
+        return pa.Table.from_pylist(rows, schema=schema)
+
+    def _convert_airbyte_sync_mode_to_arrow_flight_mode(
+        self, sync_mode: DestinationSyncMode
+    ) -> tuple:
+        """Convert Airbyte sync mode to Arrow Flight SQL table definition options.
+
+        Returns:
+            tuple: (if_not_exist_option, if_exists_option)
+        """
+        if sync_mode == DestinationSyncMode.overwrite:
+            return (
+                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableNotExistOption.TABLE_NOT_EXIST_OPTION_CREATE,
+                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableExistsOption.TABLE_EXISTS_OPTION_REPLACE,
+            )
+        else:  # append/create_append
+            return (
+                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableNotExistOption.TABLE_NOT_EXIST_OPTION_CREATE,
+                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableExistsOption.TABLE_EXISTS_OPTION_APPEND,
+            )
+
+    def _estimate_rows_per_batch(self, table: pa.Table) -> int:
+        if rows_per_batch := self.config.get("rows_per_batch"):
+            return rows_per_batch
+
+        # Split table into batches to avoid gRPC message size limits (4MB default)
+        # Use memory size to determine batch boundaries (3MB per batch to stay safely under 4MB limit)
+        total_size = table.get_total_buffer_size()
+        if total_size > 3 * 1024 * 1024:
+            return int(len(table) * 3 * 1024 * 1024 / total_size)
+        else:
+            return len(table)
 
     def flush(self):
         for stream, records in self.buffer.items():
             if not records:
                 continue
 
-            self._create_table_if_not_exists(stream)
+            stream_config = self.streams[stream]
 
-            buffer = self._convert_records_to_parquet(stream, records)
-            params = self.streams[stream]
-            sync_mode = (
-                ParquetUploaderMode.append_dedup
-                if params["sync_mode"] == DestinationSyncMode.append_dedup
-                else ParquetUploaderMode.append
+            table = self._convert_records_to_pyarrow_table(stream, records)
+            if_not_exist, if_exists = (
+                self._convert_airbyte_sync_mode_to_arrow_flight_mode(
+                    stream_config.sync_mode
+                )
             )
-            self.parquet_uploader.upload(
-                stream,
-                buffer,
-                sync_mode,
-                params["primary_key"],
+
+            command = arrow_flight_sql_definitions.CommandStatementIngest()
+            command.table = stream
+            command.schema = self.config.get("schema", "")
+            command.catalog = self.config.get("catalog", "")
+            command.table_definition_options.if_not_exist = if_not_exist
+            command.table_definition_options.if_exists = if_exists
+
+            if self.streams[stream].sync_mode in (
+                DestinationSyncMode.append_dedup,
+                DestinationSyncMode.update,
+            ):
+                if not stream_config.primary_key:
+                    raise ValueError(f"Stream {stream} has no primary key but {stream_config.sync_mode} requires one")
+                command.options["upsert_keys"] = json.dumps(stream_config.primary_key)
+
+
+            command_bytes = command.SerializeToString()
+            any_message = ProtobufAny()
+            any_message.type_url = (
+                "type.googleapis.com/arrow.flight.protocol.sql.CommandStatementIngest"
             )
+            any_message.value = command_bytes
+
+            any_bytes = any_message.SerializeToString()
+            descriptor = pyarrow.flight.FlightDescriptor.for_command(any_bytes)
+
+            call_options = pyarrow.flight.FlightCallOptions(
+                headers=[(b"authorization", self.auth_header)]
+            )
+
+            estimated_rows_per_batch = self._estimate_rows_per_batch(table)
+            batches = table.to_batches(max_chunksize=estimated_rows_per_batch)
+
+            writer, _ = self.client.do_put(
+                descriptor, table.schema, options=call_options
+            )
+            with writer:
+                for batch in batches:
+                    writer.write_batch(batch)
 
         self.buffer.clear()

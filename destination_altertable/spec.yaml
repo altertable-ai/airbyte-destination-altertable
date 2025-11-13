@@ -16,19 +16,15 @@ connectionSpecification:
     - password
     - catalog
     - schema
-    - verify_ssl_certificate
   properties:
     host:
       type: string
       title: Host
-      default: api.altertable.ai
+      default: flight.altertable.ai
     port:
       type: integer
       title: Port
       default: 443
-    http_port:
-      type: integer
-      title: HTTP Port
     username:
       type: string
       title: Username
@@ -43,7 +39,11 @@ connectionSpecification:
     schema:
       type: string
       title: Schema
-    verify_ssl_certificate:
+    rows_per_batch:
+      type: ["integer", "null"]
+      title: Rows per batch
+      default: null
+    tls:
       type: boolean
-      title: Verify SSL Certificate
+      title: Use TLS for connection to Altertable
       default: true
