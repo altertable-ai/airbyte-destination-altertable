@@ -4,11 +4,11 @@ RUN apt-get update && apt-get -y upgrade && pip install --upgrade pip
 
 WORKDIR /airbyte/integration_code
 
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
-
 COPY main.py ./
+COPY pyproject.toml ./
 COPY destination_altertable ./destination_altertable
+
+RUN pip install .
 
 ENV AIRBYTE_ENTRYPOINT="python /airbyte/integration_code/main.py"
 ENTRYPOINT ["python", "/airbyte/integration_code/main.py"]

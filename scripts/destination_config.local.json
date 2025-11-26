@@ -1,10 +1,9 @@
 {
   "host": "localhost",
-  "port": 15001,
-  "http_port": 15000,
-  "catalog": "lh_altertable_production",
+  "port": 15002,
+  "catalog": "altertable",
   "schema": "public",
   "username": "altertable",
-  "password": "lh_sk_a_password",
-  "verify_ssl_certificate": false
+  "password": "password",
+  "tls": false
 }
