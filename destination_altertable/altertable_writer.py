@@ -78,7 +78,7 @@ class AltertableWriter:
 
     def test_connection(self):
         stream = self.client.query("SELECT 1")
-        stream.readall()
+        stream.read_all()
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[record.stream].append(record)
