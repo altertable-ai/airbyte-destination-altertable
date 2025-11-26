@@ -31,7 +31,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "ruff>=0.14"
+    "ruff>=0.14",
+    "black>=24.0",
+    "isort>=5.0"
 ]
 
 [project.scripts]
