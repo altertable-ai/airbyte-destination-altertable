@@ -4,3 +4,4 @@ discover.json
 catalog.json
 /airbyte_destination_altertable.egg-info
 /build
+/venv

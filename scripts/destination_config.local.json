@@ -4,6 +4,6 @@
   "catalog": "altertable",
   "schema": "public",
   "username": "altertable",
-  "password": "lh_sk_a_password",
-  "tls": false,
+  "password": "password",
+  "tls": false
 }

@@ -1,20 +1,16 @@
-import base64
 import json
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
+import altertable_flightsql
+from altertable_flightsql.client import IngestIncrementalOptions, IngestTableMode
 import pyarrow as pa
-import pyarrow.flight
-import pyarrow.ipc as ipc
 from airbyte_cdk.models import (
     AirbyteRecordMessage,
     ConfiguredAirbyteCatalog,
     DestinationSyncMode,
 )
-from google.protobuf.any_pb2 import Any as ProtobufAny
-
-from destination_altertable import arrow_flight_sql_definitions
 
 
 @dataclass(frozen=True)
@@ -22,17 +18,21 @@ class AirbyteStream:
     name: str
     properties: dict[str, Any]
     sync_mode: DestinationSyncMode
-    primary_key: list[list[str]] | None = None
+    primary_key: list[str] = field(default_factory=list)
+    cursor_field: list[str] = field(default_factory=list)
 
 
 class AltertableWriter:
     def __init__(self, config: Dict[str, Any]):
-        scheme = "grpc+tls" if config.get("tls", True) else "grpc"
-        location = f"{scheme}://{config['host']}:{config['port']}"
+        self.client = altertable_flightsql.Client(
+            username=config["username"],
+            password=config["password"],
+            host=config["host"],
+            port=config["port"],
+            tls=config.get("tls", True),
+        )
 
         self.config = config
-        self.client = pyarrow.flight.FlightClient(location)
-        self.auth_header = self._get_auth_header(config["username"], config["password"])
         self.buffer = defaultdict(list)
         self.streams: Dict[str, AirbyteStream] = {}
 
@@ -53,13 +53,6 @@ class AltertableWriter:
             except Exception:
                 pass  # Ignore errors on close
 
-    @classmethod
-    def _get_auth_header(cls, username, password) -> str:
-        """Generate basic auth header value"""
-        credentials = f"{username}:{password}"
-        encoded = base64.b64encode(credentials.encode()).decode()
-        return f"Bearer {encoded}".encode()
-
     def set_streams(self, catalog: ConfiguredAirbyteCatalog):
         self.streams.update(
             {
@@ -70,20 +63,23 @@ class AltertableWriter:
                     primary_key=self._get_primary_key(
                         stream.primary_key or stream.stream.source_defined_primary_key
                     ),
+                    cursor_field=stream.cursor_field or stream.stream.source_defined_cursor or []
+                    ,
                 )
                 for stream in catalog.streams
             }
         )
 
     def test_connection(self):
-        list(self.client.list_actions())
+        stream = self.client.query("SELECT 1")
+        stream.readall()
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[record.stream].append(record)
 
-    def _get_primary_key(self, primary_key: list[list[str]] | None) -> list[str] | None:
+    def _get_primary_key(self, primary_key: list[list[str]] | None) -> list[str]:
         if primary_key is None:
-            return None
+            return []
         if any(len(pkey) > 1 for pkey in primary_key):
             raise NotImplementedError("Nested primary keys are not supported yet")
         return [pkey[0] for pkey in primary_key]
@@ -115,25 +111,6 @@ class AltertableWriter:
 
         return pa.Table.from_pylist(rows, schema=schema)
 
-    def _convert_airbyte_sync_mode_to_arrow_flight_mode(
-        self, sync_mode: DestinationSyncMode
-    ) -> tuple:
-        """Convert Airbyte sync mode to Arrow Flight SQL table definition options.
-
-        Returns:
-            tuple: (if_not_exist_option, if_exists_option)
-        """
-        if sync_mode == DestinationSyncMode.overwrite:
-            return (
-                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableNotExistOption.TABLE_NOT_EXIST_OPTION_CREATE,
-                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableExistsOption.TABLE_EXISTS_OPTION_REPLACE,
-            )
-        else:  # append/create_append
-            return (
-                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableNotExistOption.TABLE_NOT_EXIST_OPTION_CREATE,
-                arrow_flight_sql_definitions.CommandStatementIngest.TableDefinitionOptions.TableExistsOption.TABLE_EXISTS_OPTION_APPEND,
-            )
-
     def _estimate_rows_per_batch(self, table: pa.Table) -> int:
         if rows_per_batch := self.config.get("rows_per_batch"):
             return rows_per_batch
@@ -146,57 +123,44 @@ class AltertableWriter:
         else:
             return len(table)
 
+    def _get_incremental_options(self, stream_config: AirbyteStream) -> Optional[IngestIncrementalOptions]:
+        if stream_config.sync_mode not in (
+            DestinationSyncMode.append_dedup,
+            DestinationSyncMode.update,
+        ):
+            return None
+
+        if not stream_config.primary_key:
+            raise ValueError(
+                f"Stream {stream_config.name} has no primary key but {stream_config.sync_mode} requires one"
+            )
+
+        return IngestIncrementalOptions(
+            primary_key=stream_config.primary_key,
+            cursor_field=stream_config.cursor_field,
+        )
+
     def flush(self):
         for stream, records in self.buffer.items():
             if not records:
                 continue
 
             stream_config = self.streams[stream]
-
             table = self._convert_records_to_pyarrow_table(stream, records)
-            if_not_exist, if_exists = (
-                self._convert_airbyte_sync_mode_to_arrow_flight_mode(
-                    stream_config.sync_mode
-                )
-            )
 
-            command = arrow_flight_sql_definitions.CommandStatementIngest()
-            command.table = stream
-            command.schema = self.config.get("schema", "")
-            command.catalog = self.config.get("catalog", "")
-            command.table_definition_options.if_not_exist = if_not_exist
-            command.table_definition_options.if_exists = if_exists
+            with self.client.ingest(
+                table_name=stream,
+                schema=table.schema,
+                schema_name=self.config.get("schema", ""),
+                catalog_name=self.config.get("catalog", ""),
+                mode=IngestTableMode.REPLACE
+                if stream_config.sync_mode == DestinationSyncMode.overwrite
+                else IngestTableMode.CREATE_APPEND,
+                incremental_options=self._get_incremental_options(stream_config),
+            ) as writer:
+                estimated_rows_per_batch = self._estimate_rows_per_batch(table)
+                batches = table.to_batches(max_chunksize=estimated_rows_per_batch)
 
-            if self.streams[stream].sync_mode in (
-                DestinationSyncMode.append_dedup,
-                DestinationSyncMode.update,
-            ):
-                if not stream_config.primary_key:
-                    raise ValueError(f"Stream {stream} has no primary key but {stream_config.sync_mode} requires one")
-                command.options["upsert_keys"] = json.dumps(stream_config.primary_key)
-
-
-            command_bytes = command.SerializeToString()
-            any_message = ProtobufAny()
-            any_message.type_url = (
-                "type.googleapis.com/arrow.flight.protocol.sql.CommandStatementIngest"
-            )
-            any_message.value = command_bytes
-
-            any_bytes = any_message.SerializeToString()
-            descriptor = pyarrow.flight.FlightDescriptor.for_command(any_bytes)
-
-            call_options = pyarrow.flight.FlightCallOptions(
-                headers=[(b"authorization", self.auth_header)]
-            )
-
-            estimated_rows_per_batch = self._estimate_rows_per_batch(table)
-            batches = table.to_batches(max_chunksize=estimated_rows_per_batch)
-
-            writer, _ = self.client.do_put(
-                descriptor, table.schema, options=call_options
-            )
-            with writer:
                 for batch in batches:
                     writer.write_batch(batch)
 
