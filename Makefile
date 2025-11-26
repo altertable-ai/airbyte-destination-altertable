@@ -5,6 +5,6 @@ lint:
 	ruff check --fix .
 
 build:
-	docker build -t altertable-ai/destination-altertable .
+	docker build -t altertable-ai/airbyte-destination-altertable .
 
 .PHONY: all lint build

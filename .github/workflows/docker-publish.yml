@@ -11,7 +11,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: altertable-ai/airbyte-destination
+  IMAGE_NAME: altertable-ai/airbyte-destination-altertable
 
 jobs:
   build-and-push:
