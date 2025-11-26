@@ -13,6 +13,11 @@ from airbyte_cdk.models import (
 )
 
 
+# Maximum GRPC message size is 4MB. We use 3MB as a safety margin because
+# we only have a message size average.
+MAX_BATCH_SIZE = 3 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class AirbyteStream:
     name: str
@@ -118,8 +123,8 @@ class AltertableWriter:
         # Split table into batches to avoid gRPC message size limits (4MB default)
         # Use memory size to determine batch boundaries (3MB per batch to stay safely under 4MB limit)
         total_size = table.get_total_buffer_size()
-        if total_size > 3 * 1024 * 1024:
-            return int(len(table) * 3 * 1024 * 1024 / total_size)
+        if total_size > MAX_BATCH_SIZE:
+            return int(len(table) * MAX_BATCH_SIZE / total_size)
         else:
             return len(table)
 
