@@ -68,8 +68,9 @@ class AltertableWriter:
                     primary_key=self._get_primary_key(
                         stream.primary_key or stream.stream.source_defined_primary_key
                     ),
-                    cursor_field=stream.cursor_field or stream.stream.source_defined_cursor or []
-                    ,
+                    cursor_field=stream.cursor_field
+                    or stream.stream.source_defined_cursor
+                    or [],
                 )
                 for stream in catalog.streams
             }
@@ -128,7 +129,9 @@ class AltertableWriter:
         else:
             return len(table)
 
-    def _get_incremental_options(self, stream_config: AirbyteStream) -> Optional[IngestIncrementalOptions]:
+    def _get_incremental_options(
+        self, stream_config: AirbyteStream
+    ) -> Optional[IngestIncrementalOptions]:
         if stream_config.sync_mode not in (
             DestinationSyncMode.append_dedup,
             DestinationSyncMode.update,
