@@ -1,21 +1,27 @@
-FROM python:3.12.10
+FROM python:3.12-slim-bookworm AS builder
 
-RUN apt-get update && apt-get -y upgrade && pip install --upgrade pip
-RUN useradd -m airbyte
-RUN mkdir -p /airbyte/integration_code && chown -R airbyte:airbyte /airbyte/integration_code
-
-USER airbyte
-
-WORKDIR /airbyte/integration_code
+RUN mkdir -p /airbyte-destination-altertable
+WORKDIR /airbyte-destination-altertable
 
 COPY main.py ./
 COPY pyproject.toml ./
 COPY destination_altertable ./destination_altertable
 
-RUN pip install .
+RUN python -m venv venv
+RUN ./venv/bin/pip install .
 
-ENV AIRBYTE_ENTRYPOINT="python /airbyte/integration_code/main.py"
-ENTRYPOINT ["python", "/airbyte/integration_code/main.py"]
+FROM python:3.12-slim-bookworm
+
+COPY --from=builder /airbyte-destination-altertable /airbyte-destination-altertable
+RUN mkdir -p /airbyte
+
+RUN useradd -m airbyte
+RUN chown -R airbyte:airbyte /airbyte-destination-altertable /airbyte
+
+USER airbyte
+
+ENV AIRBYTE_ENTRYPOINT="/airbyte-destination-altertable/venv/bin/python /airbyte-destination-altertable/main.py"
+ENTRYPOINT ["/airbyte-destination-altertable/venv/bin/python", "/airbyte-destination-altertable/main.py"]
 
 LABEL io.airbyte.version=0.1.0
 LABEL io.airbyte.name=altertable-ai/airbyte-destination-altertable
