@@ -1,4 +1,3 @@
-import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -11,6 +10,8 @@ from airbyte_cdk.models import (
     ConfiguredAirbyteCatalog,
     DestinationSyncMode,
 )
+
+from .type_conversion import convert_to_arrow
 
 
 # Maximum GRPC message size is 4MB. We use 3MB as a safety margin because
@@ -35,6 +36,8 @@ class AltertableWriter:
             host=config["host"],
             port=config["port"],
             tls=config.get("tls", True),
+            catalog=config.get("catalog"),
+            schema=config.get("schema"),
         )
 
         self.config = config
@@ -90,32 +93,34 @@ class AltertableWriter:
             raise NotImplementedError("Nested primary keys are not supported yet")
         return [pkey[0] for pkey in primary_key]
 
-    def _airbyte_type_to_arrow_type(self, airbyte_type: str) -> pa.DataType:
-        if isinstance(airbyte_type, list):
-            airbyte_type = next((t for t in airbyte_type if t != "null"))
-
-        return {
-            "string": pa.string(),
-            "integer": pa.int64(),
-            "number": pa.float64(),
-            "boolean": pa.bool_(),
-        }.get(airbyte_type, pa.string())
-
     def _convert_records_to_pyarrow_table(
         self, stream: str, records: list[AirbyteRecordMessage]
     ) -> pa.Table:
-        schema = pa.schema(
-            [
-                (field, self._airbyte_type_to_arrow_type(property.get("type")))
-                for field, property in self.streams[stream].properties.items()
-            ]
-        )
-        rows = [
-            {k: json.dumps(v) if isinstance(v, dict) else v for k, v in r.data.items()}
-            for r in records
-        ]
+        properties = self.streams[stream].properties
 
-        return pa.Table.from_pylist(rows, schema=schema)
+        fields = []
+        converted_rows = [{} for _ in records]
+
+        for field_name, prop in properties.items():
+            # Get the first non-null value to determine type (or use None)
+            sample_value = next(
+                (
+                    r.data.get(field_name)
+                    for r in records
+                    if r.data.get(field_name) is not None
+                ),
+                None,
+            )
+            pa_type, _ = convert_to_arrow(sample_value, prop)
+            fields.append((field_name, pa_type))
+
+            # Convert all values for this field
+            for i, record in enumerate(records):
+                _, converted = convert_to_arrow(record.data.get(field_name), prop)
+                converted_rows[i][field_name] = converted
+
+        schema = pa.schema(fields)
+        return pa.Table.from_pylist(converted_rows, schema=schema)
 
     def _estimate_rows_per_batch(self, table: pa.Table) -> int:
         if rows_per_batch := self.config.get("rows_per_batch"):

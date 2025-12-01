@@ -25,15 +25,14 @@ classifiers = [
 
 dependencies = [
     "airbyte_cdk>=6.51.0",
-    "altertable-flightsql>=0.2.1"
+    "altertable-flightsql>=0.2.0"
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "ruff>=0.14",
-    "black>=24.0",
-    "isort>=5.0"
+    "testcontainers>=4.0"
 ]
 
 [project.scripts]
