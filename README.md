@@ -10,6 +10,14 @@ The destination is available as a Docker image at:
 ghcr.io/altertable-ai/airbyte-destination-altertable
 ```
 
+### Platform Support
+
+This connector is built as a multi-platform Docker image supporting:
+- **linux/amd64** - Intel/AMD 64-bit systems
+- **linux/arm64** - ARM 64-bit systems (Apple Silicon, AWS Graviton, etc.)
+
+Docker will automatically select the appropriate image for your platform.
+
 ### Adding the Custom Destination in Airbyte
 
 1. Open the Airbyte web UI
