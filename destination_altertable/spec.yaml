@@ -29,6 +29,7 @@ connectionSpecification:
     password:
       type: string
       title: Password
+      airbyte_secret: true
     catalog:
       type: string
       title: Catalog

@@ -43,6 +43,7 @@ class AltertableWriter:
         self.config = config
         self.buffer = defaultdict(list)
         self.streams: Dict[str, AirbyteStream] = {}
+        self._replaced_streams: set[str] = set()
 
     def __enter__(self):
         """Enter context manager"""
@@ -130,7 +131,7 @@ class AltertableWriter:
         # Use memory size to determine batch boundaries (3MB per batch to stay safely under 4MB limit)
         total_size = table.get_total_buffer_size()
         if total_size > MAX_BATCH_SIZE:
-            return int(len(table) * MAX_BATCH_SIZE / total_size)
+            return max(1, int(len(table) * MAX_BATCH_SIZE / total_size))
         else:
             return len(table)
 
@@ -153,6 +154,15 @@ class AltertableWriter:
             cursor_field=stream_config.cursor_field,
         )
 
+    def _get_ingest_mode(
+        self, stream: str, sync_mode: DestinationSyncMode
+    ) -> IngestTableMode:
+        if sync_mode != DestinationSyncMode.overwrite:
+            return IngestTableMode.CREATE_APPEND
+        if stream in self._replaced_streams:
+            return IngestTableMode.CREATE_APPEND
+        return IngestTableMode.REPLACE
+
     def flush(self):
         for stream, records in self.buffer.items():
             if not records:
@@ -160,15 +170,14 @@ class AltertableWriter:
 
             stream_config = self.streams[stream]
             table = self._convert_records_to_pyarrow_table(stream, records)
+            mode = self._get_ingest_mode(stream, stream_config.sync_mode)
 
             with self.client.ingest(
                 table_name=stream,
                 schema=table.schema,
                 schema_name=self.config.get("schema", ""),
                 catalog_name=self.config.get("catalog", ""),
-                mode=IngestTableMode.REPLACE
-                if stream_config.sync_mode == DestinationSyncMode.overwrite
-                else IngestTableMode.CREATE_APPEND,
+                mode=mode,
                 incremental_options=self._get_incremental_options(stream_config),
             ) as writer:
                 estimated_rows_per_batch = self._estimate_rows_per_batch(table)
@@ -176,5 +185,8 @@ class AltertableWriter:
 
                 for batch in batches:
                     writer.write_batch(batch)
+
+            if mode == IngestTableMode.REPLACE:
+                self._replaced_streams.add(stream)
 
         self.buffer.clear()
