@@ -14,9 +14,9 @@ from airbyte_cdk.models import (
 from .type_conversion import convert_to_arrow
 
 
-# Maximum GRPC message size is 4MB. We use 3MB as a safety margin because
+# Maximum GRPC message size is 512MB. We use 400MB as a safety margin because
 # we only have a message size average.
-MAX_BATCH_SIZE = 3 * 1024 * 1024
+MAX_BATCH_SIZE = 400 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -127,8 +127,8 @@ class AltertableWriter:
         if rows_per_batch := self.config.get("rows_per_batch"):
             return rows_per_batch
 
-        # Split table into batches to avoid gRPC message size limits (4MB default)
-        # Use memory size to determine batch boundaries (3MB per batch to stay safely under 4MB limit)
+        # Split table into batches to avoid gRPC message size limits (512MB default)
+        # Use memory size to determine batch boundaries (400MB per batch to stay safely under 512MB limit)
         total_size = table.get_total_buffer_size()
         if total_size > MAX_BATCH_SIZE:
             return max(1, int(len(table) * MAX_BATCH_SIZE / total_size))
