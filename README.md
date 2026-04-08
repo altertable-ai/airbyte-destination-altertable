@@ -13,6 +13,7 @@ ghcr.io/altertable-ai/airbyte-destination-altertable
 ### Platform Support
 
 This connector is built as a multi-platform Docker image supporting:
+
 - **linux/amd64** - Intel/AMD 64-bit systems
 - **linux/arm64** - ARM 64-bit systems (Apple Silicon, AWS Graviton, etc.)
 
@@ -44,24 +45,37 @@ When creating a new destination, you'll need to provide the following required p
 
 For more information on setting up your Altertable account and obtaining credentials, see the [Altertable documentation](https://docs.altertable.ai).
 
-## Run locally
+## Development
 
-- Setup your Python venv:
+### Setup
 
+Install [Poetry](https://python-poetry.org/docs/#installation), then install the project dependencies:
+
+```bash
+poetry install --with dev
 ```
-python -m venv venv
-. venv/bin/activate # change depending on your shell
+
+### Run tests
+
+```bash
+# Unit tests (no external service required)
+poetry run pytest unit_tests/ -v
+
+# Integration tests (spins up altertable-mock via testcontainers, requires Docker)
+poetry run pytest integration_tests/ -v
 ```
+
+### Run locally with a source
 
 - Discover the source schema and generate the catalog.json file:
 
-```
+```bash
 docker run --rm -v $PWD/scripts/faker:/data airbyte/source-faker:latest discover --config /data/config.json > scripts/faker/discover.json
-python scripts/gen_catalog.py scripts/faker/discover.json scripts/faker/catalog.json
+poetry run python scripts/gen_catalog.py scripts/faker/discover.json scripts/faker/catalog.json
 ```
 
 - Run the ETL:
 
-```
+```bash
 ./scripts/run.sh faker
 ```

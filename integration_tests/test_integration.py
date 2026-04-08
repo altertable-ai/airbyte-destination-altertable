@@ -153,6 +153,67 @@ class TestOverwriteSyncMode:
         assert results[0]["id"] == 10
         assert results[0]["name"] == "New Person"
 
+    def test_overwrite_multiple_batches_preserves_all_records(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that overwrite mode keeps records from all batches, not just the last one.
+
+        Airbyte sends data in multiple batches separated by state messages.
+        The table should be replaced once (on the first batch) and subsequent
+        batches should append so that all records survive.
+        """
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.overwrite,
+            json_schema=JSON_SCHEMA,
+        )
+
+        # Simulate three batches, each flushed by a state message
+        input_messages = [
+            # Batch 1
+            make_record_message(
+                table_name,
+                {"id": 10, "name": "Batch 1 - A", "created_at": "2024-01-01T00:00:00Z"},
+            ),
+            make_record_message(
+                table_name,
+                {"id": 11, "name": "Batch 1 - B", "created_at": "2024-01-01T00:00:00Z"},
+            ),
+            make_state_message(table_name),
+            # Batch 2
+            make_record_message(
+                table_name,
+                {"id": 12, "name": "Batch 2 - A", "created_at": "2024-01-02T00:00:00Z"},
+            ),
+            make_state_message(table_name),
+            # Batch 3
+            make_record_message(
+                table_name,
+                {"id": 13, "name": "Batch 3 - A", "created_at": "2024-01-03T00:00:00Z"},
+            ),
+            make_record_message(
+                table_name,
+                {"id": 14, "name": "Batch 3 - B", "created_at": "2024-01-03T00:00:00Z"},
+            ),
+            make_state_message(table_name),
+        ]
+
+        messages = list(destination.write(test_config, catalog, iter(input_messages)))
+        assert len(messages) == 3  # one state message echoed per batch
+
+        results = query_table(client, catalog_name, schema_name, table_name)
+
+        # Pre-existing rows (ids 1,2,3) should be gone; all 5 new records should be present
+        assert len(results) == 5
+        assert {r["id"] for r in results} == {10, 11, 12, 13, 14}
+
 
 class TestAppendSyncMode:
     """Test the append destination sync mode."""

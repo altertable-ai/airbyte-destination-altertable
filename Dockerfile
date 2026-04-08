@@ -5,10 +5,14 @@ WORKDIR /airbyte-destination-altertable
 
 COPY main.py ./
 COPY pyproject.toml ./
+COPY poetry.lock ./
+COPY README.md ./
 COPY destination_altertable ./destination_altertable
 
 RUN python -m venv venv
-RUN ./venv/bin/pip install .
+RUN ./venv/bin/pip install poetry
+RUN ./venv/bin/poetry install --only main --no-root
+RUN ./venv/bin/pip install . --no-build-isolation
 
 FROM python:3.12-slim-bookworm
 
