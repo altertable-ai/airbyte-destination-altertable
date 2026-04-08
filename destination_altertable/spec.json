@@ -11,13 +11,40 @@
     "required": ["username", "password", "catalog", "schema"],
     "additionalProperties": true,
     "properties": {
+      "username": {
+        "title": "Username",
+        "type": "string",
+        "description": "Your Altertable lakehouse username.",
+        "order": 0
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "description": "Your Altertable lakehouse password.",
+        "airbyte_secret": true,
+        "order": 1
+      },
+      "catalog": {
+        "title": "Catalog",
+        "type": "string",
+        "description": "The target catalog where data will be written.",
+        "examples": ["my_catalog"],
+        "order": 2
+      },
+      "schema": {
+        "title": "Schema",
+        "type": "string",
+        "description": "The schema within the catalog to write data to.",
+        "examples": ["main", "public"],
+        "order": 3
+      },
       "host": {
         "title": "Host",
         "type": "string",
         "description": "Hostname of the Altertable Flight SQL server.",
         "examples": ["flight.altertable.ai"],
         "default": "flight.altertable.ai",
-        "order": 0
+        "order": 4
       },
       "port": {
         "title": "Port",
@@ -25,33 +52,6 @@
         "description": "Port of the Altertable Flight SQL server.",
         "examples": [443],
         "default": 443,
-        "order": 1
-      },
-      "username": {
-        "title": "Username",
-        "type": "string",
-        "description": "Your Altertable account username.",
-        "order": 2
-      },
-      "password": {
-        "title": "Password",
-        "type": "string",
-        "description": "Your Altertable account password.",
-        "airbyte_secret": true,
-        "order": 3
-      },
-      "catalog": {
-        "title": "Catalog",
-        "type": "string",
-        "description": "The target catalog where data will be written.",
-        "examples": ["my_catalog"],
-        "order": 4
-      },
-      "schema": {
-        "title": "Schema",
-        "type": "string",
-        "description": "The schema within the catalog to write data to.",
-        "examples": ["main", "public"],
         "order": 5
       },
       "tls": {
