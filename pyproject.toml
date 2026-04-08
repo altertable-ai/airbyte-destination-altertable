@@ -3,23 +3,36 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "airbyte-destination-altertable"
+name = "destination-altertable"
 version = "0.1.0"
-description = "Altertable's Airbyte destination"
+description = "Destination implementation for Altertable."
 authors = ["Altertable <contact@altertable.ai>"]
-license = "MIT"
+license = "ELv2"
 readme = "README.md"
-packages = [{include = "destination_altertable"}]
+documentation = "https://docs.airbyte.com/integrations/destinations/altertable"
+homepage = "https://airbyte.com"
+repository = "https://github.com/airbytehq/airbyte"
+
+[[tool.poetry.packages]]
+include = "destination_altertable"
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
 airbyte-cdk = ">=6.51.0"
 altertable-flightsql = ">=0.2.2"
 
+[tool.poetry.scripts]
+destination-altertable = "destination_altertable.run:run"
+
 [tool.poetry.group.dev.dependencies]
 pytest = ">=7.0"
+pytest-mock = ">=3.6"
 ruff = ">=0.14"
 testcontainers = ">=4.0"
 
-[tool.poetry.scripts]
-destination-altertable = "main:main"
+[tool.poe]
+include = [
+    # Shared tasks definition file(s) can be imported here.
+    # Run `poe` or `poe --help` to see the list of available tasks.
+    "${POE_GIT_DIR}/poe-tasks/poetry-connector-tasks.toml",
+]
