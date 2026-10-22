@@ -79,3 +79,29 @@ def test_flush_keeps_integers_beyond_float64_precision(client: MagicMock) -> Non
         {"ad_id": TIKTOK_AD_ID, "spend": 12.5},
         {"ad_id": None, "spend": 3.0},
     ]
+
+
+def test_flush_types_number_columns_on_all_chunks(
+    client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("destination_altertable.altertable_writer.ROWS_PER_CHUNK", 1)
+    writer = make_writer()
+    for data in [
+        {"ad_id": TIKTOK_AD_ID, "spend": 12.5},
+        {"ad_id": 1.0, "spend": 2**60},
+        {"ad_id": None, "spend": 3},
+    ]:
+        writer.buffer_record(
+            AirbyteRecordMessage(stream="ads", data=data, emitted_at=1000)
+        )
+
+    writer.flush()
+
+    batches = written_batches(client)
+    schema = pa.schema([("ad_id", pa.int64()), ("spend", pa.float64())])
+    assert [batch.schema for batch in batches] == [schema] * 3
+    assert [row for batch in batches for row in batch.to_pylist()] == [
+        {"ad_id": TIKTOK_AD_ID, "spend": 12.5},
+        {"ad_id": 1, "spend": float(2**60)},
+        {"ad_id": None, "spend": 3.0},
+    ]
