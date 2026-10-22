@@ -75,14 +75,14 @@ files = [
 
 [[package]]
 name = "altertable-flightsql"
-version = "0.2.2"
+version = "0.4.1"
 description = "Python client library for Altertable"
 optional = false
 python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "altertable_flightsql-0.2.2-py3-none-any.whl", hash = "sha256:ef7162f6a118bfdd48106acb2a31f571af11e633e99b7f718113818baeff1891"},
-    {file = "altertable_flightsql-0.2.2.tar.gz", hash = "sha256:e36e2c54f1d7abbc34f746e3e9803f4c00830b0d1b366c3eca7c429037210e36"},
+    {file = "altertable_flightsql-0.4.1-py3-none-any.whl", hash = "sha256:ebc4fd35706569ee1ebd17f638e6dd6c9045e97c0af63c06ac7c2fc065223143"},
+    {file = "altertable_flightsql-0.4.1.tar.gz", hash = "sha256:077652f60417318a9a20fa9fd783f589c58dd5c0983fbb29f47557293d7e7bc9"},
 ]
 
 [package.dependencies]
@@ -90,7 +90,7 @@ protobuf = ">=5.26.0"
 pyarrow = ">=15.0.0"
 
 [package.extras]
-dev = ["black (>=22.0.0)", "grpcio-tools (>=1.73.0)", "isort (>=5.10.0)", "pandas (>=1.3.0)", "pytest (>=7.0.0)", "pytest-cov (>=3.0.0)", "ruff (>=0.0.270)", "testcontainers (>=4.0.0)"]
+dev = ["black (>=22.0.0)", "grpcio (==1.80.0)", "grpcio-tools (==1.80.0)", "isort (>=5.10.0)", "pandas (>=1.3.0)", "pytest (>=7.0.0)", "pytest-cov (>=3.0.0)", "ruff (>=0.0.270)", "testcontainers (>=4.0.0)"]
 
 [[package]]
 name = "annotated-types"
@@ -3116,4 +3116,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<3.13"
-content-hash = "59ab1a3407aa1ce1de9a4f04f4b8cd9080738ac5c2a79549784bfdbbe441dd21"
+content-hash = "3848212d902d778e87e6129fb664f78d8fde7d68d3851d1300047f93a851a2e9"

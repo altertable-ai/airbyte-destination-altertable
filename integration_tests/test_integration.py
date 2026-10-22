@@ -4,6 +4,8 @@ Integration tests for DestinationAltertable using testcontainers.
 Uses ghcr.io/altertable-ai/altertable-mock to simulate the Altertable backend.
 """
 
+from unittest.mock import patch
+
 from airbyte_cdk.models import (
     AirbyteMessage,
     AirbyteRecordMessage,
@@ -18,6 +20,8 @@ from airbyte_cdk.models import (
     SyncMode,
     Type,
 )
+
+from destination_altertable.altertable_writer import AltertableWriter
 
 JSON_SCHEMA = {
     "type": "object",
@@ -213,6 +217,49 @@ class TestOverwriteSyncMode:
         # Pre-existing rows (ids 1,2,3) should be gone; all 5 new records should be present
         assert len(results) == 5
         assert {r["id"] for r in results} == {10, 11, 12, 13, 14}
+
+    def test_overwrite_flushes_early_between_states(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that records are flushed once the buffer is full, without waiting
+        for a state message, and that only the first flush replaces the table."""
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+            "flush_threshold_mb": 1,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.overwrite,
+            json_schema=JSON_SCHEMA,
+        )
+
+        # ~70 bytes per record, so ~3MB in total
+        record_count = 40_000
+        input_messages = [
+            make_record_message(
+                table_name,
+                {"id": i, "name": f"Person {i}", "created_at": "2024-01-01T00:00:00Z"},
+            )
+            for i in range(record_count)
+        ] + [make_state_message(table_name)]
+
+        with patch.object(
+            AltertableWriter, "flush", autospec=True, side_effect=AltertableWriter.flush
+        ) as flush:
+            messages = list(
+                destination.write(test_config, catalog, iter(input_messages))
+            )
+
+        assert len(messages) == 1
+        assert flush.call_count > 1
+
+        results = query_table(client, catalog_name, schema_name, table_name)
+        assert len(results) == record_count
+        assert {r["id"] for r in results} == set(range(record_count))
 
 
 class TestAppendSyncMode:
