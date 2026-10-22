@@ -15,6 +15,7 @@ from airbyte_cdk.models import (
 from destination_altertable import altertable_writer
 from destination_altertable.altertable_writer import (
     DEFAULT_FLUSH_THRESHOLD,
+    MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO,
     AltertableWriter,
     get_flush_threshold,
     get_memory_limit,
@@ -110,24 +111,48 @@ def test_flush_threshold_from_config(cgroup) -> None:
 def test_flush_threshold_from_memory_limit(cgroup) -> None:
     v2, _ = cgroup
     v2.write_text("2147483648\n")
-    assert get_flush_threshold({}) == 2147483648 // 20
+    assert (
+        get_flush_threshold({}) == 2147483648 // MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO
+    )
 
 
 def test_flush_threshold_default(cgroup) -> None:
     assert get_flush_threshold({}) == DEFAULT_FLUSH_THRESHOLD
 
 
-def test_should_flush_once_threshold_is_reached(cgroup) -> None:
+def test_should_flush_once_threshold_is_reached(cgroup, monkeypatch) -> None:
+    monkeypatch.setattr(altertable_writer, "ROWS_PER_CHUNK", 2)
     writer = make_writer(CONFIG)
-    record_size = len(b'{"id":1,"name":"Person 1"}')
-    writer.flush_threshold = 2 * record_size
+    writer.set_streams(CATALOG)
+    writer.flush_threshold = 1
 
+    # Pending records are only counted once converted to Arrow
     writer.buffer_record(make_record(1))
-    assert writer.buffered_bytes == record_size
+    assert writer.buffered_bytes == 0
     assert not writer.should_flush()
 
     writer.buffer_record(make_record(2))
+    assert writer.buffered_bytes == writer.buffer["test_table"].batches[0].nbytes
     assert writer.should_flush()
+
+
+def test_records_are_converted_to_arrow_in_chunks(cgroup, monkeypatch) -> None:
+    monkeypatch.setattr(altertable_writer, "ROWS_PER_CHUNK", 2)
+    writer = make_writer(CONFIG)
+    writer.set_streams(CATALOG)
+    for i in range(5):
+        writer.buffer_record(make_record(i))
+
+    assert [b.num_rows for b in writer.buffer["test_table"].batches] == [2, 2]
+
+    writer.flush()
+
+    ingest_writer = writer.client.ingest.return_value.__enter__.return_value
+    batches = [call.args[0] for call in ingest_writer.write_batch.call_args_list]
+    assert [b.num_rows for b in batches] == [2, 2, 1]
+    assert [row for b in batches for row in b.to_pylist()] == [
+        {"id": i, "name": f"Person {i}"} for i in range(5)
+    ]
 
 
 def test_flush_resets_buffered_bytes(cgroup) -> None:

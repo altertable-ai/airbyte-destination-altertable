@@ -1,10 +1,8 @@
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import altertable_flightsql
-import orjson
 from altertable_flightsql.client import IngestIncrementalOptions, IngestTableMode
 import pyarrow as pa
 from airbyte_cdk.models import (
@@ -20,10 +18,13 @@ from .type_conversion import convert_to_arrow
 # we only have a message size average.
 MAX_BATCH_SIZE = 400 * 1024 * 1024
 
-# Buffered records take ~9x their JSON size in memory at flush time (Python
-# objects, converted rows and the Arrow table all coexist), so flushing every
-# 1/20th of the memory limit keeps the peak around half of it.
-MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO = 20
+# Records are converted to Arrow in chunks of this many rows, so that at most
+# one chunk per stream is held as Python objects.
+ROWS_PER_CHUNK = 1000
+
+# Buffered records take ~2x their Arrow size in memory at flush time, so
+# flushing every 1/5th of the memory limit keeps the peak below half of it.
+MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO = 5
 DEFAULT_FLUSH_THRESHOLD = 100 * 1024 * 1024
 
 CGROUP_V2_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory.max")
@@ -63,6 +64,44 @@ class AirbyteStream:
     primary_key: list[str] = field(default_factory=list)
     cursor_field: list[str] = field(default_factory=list)
 
+    @property
+    def arrow_schema(self) -> pa.Schema:
+        # Arrow types only depend on the JSON schema, not on the values.
+        return pa.schema(
+            (name, convert_to_arrow(None, prop)[0])
+            for name, prop in self.properties.items()
+        )
+
+
+class StreamBuffer:
+    """Records of a stream, converted to Arrow as they are buffered."""
+
+    def __init__(self, stream: AirbyteStream):
+        self.properties = stream.properties
+        self.schema = stream.arrow_schema
+        self.batches: list[pa.RecordBatch] = []
+        self._columns: dict[str, list] = {name: [] for name in self.properties}
+        self._pending_rows = 0
+
+    def append(self, data: dict[str, Any]) -> int:
+        """Buffer a record, returning the number of Arrow bytes it added."""
+        for name, prop in self.properties.items():
+            self._columns[name].append(convert_to_arrow(data.get(name), prop)[1])
+        self._pending_rows += 1
+        if self._pending_rows >= ROWS_PER_CHUNK:
+            return self.convert_pending()
+        return 0
+
+    def convert_pending(self) -> int:
+        """Convert pending records to an Arrow batch, returning its size in bytes."""
+        if not self._pending_rows:
+            return 0
+        batch = pa.RecordBatch.from_pydict(self._columns, schema=self.schema)
+        self.batches.append(batch)
+        self._columns = {name: [] for name in self.properties}
+        self._pending_rows = 0
+        return batch.nbytes
+
 
 class AltertableWriter:
     def __init__(self, config: Dict[str, Any]):
@@ -77,7 +116,7 @@ class AltertableWriter:
         )
 
         self.config = config
-        self.buffer = defaultdict(list)
+        self.buffer: Dict[str, StreamBuffer] = {}
         self.buffered_bytes = 0
         self.flush_threshold = get_flush_threshold(config)
         self.streams: Dict[str, AirbyteStream] = {}
@@ -123,8 +162,11 @@ class AltertableWriter:
         stream.read_all()
 
     def buffer_record(self, record: AirbyteRecordMessage):
-        self.buffer[record.stream].append(record)
-        self.buffered_bytes += len(orjson.dumps(record.data))
+        if (buffer := self.buffer.get(record.stream)) is None:
+            buffer = self.buffer[record.stream] = StreamBuffer(
+                self.streams[record.stream]
+            )
+        self.buffered_bytes += buffer.append(record.data)
 
     def should_flush(self) -> bool:
         return self.buffered_bytes >= self.flush_threshold
@@ -135,35 +177,6 @@ class AltertableWriter:
         if any(len(pkey) > 1 for pkey in primary_key):
             raise NotImplementedError("Nested primary keys are not supported yet")
         return [pkey[0] for pkey in primary_key]
-
-    def _convert_records_to_pyarrow_table(
-        self, stream: str, records: list[AirbyteRecordMessage]
-    ) -> pa.Table:
-        properties = self.streams[stream].properties
-
-        fields = []
-        converted_rows = [{} for _ in records]
-
-        for field_name, prop in properties.items():
-            # Get the first non-null value to determine type (or use None)
-            sample_value = next(
-                (
-                    r.data.get(field_name)
-                    for r in records
-                    if r.data.get(field_name) is not None
-                ),
-                None,
-            )
-            pa_type, _ = convert_to_arrow(sample_value, prop)
-            fields.append((field_name, pa_type))
-
-            # Convert all values for this field
-            for i, record in enumerate(records):
-                _, converted = convert_to_arrow(record.data.get(field_name), prop)
-                converted_rows[i][field_name] = converted
-
-        schema = pa.schema(fields)
-        return pa.Table.from_pylist(converted_rows, schema=schema)
 
     def _estimate_rows_per_batch(self, table: pa.Table) -> int:
         if rows_per_batch := self.config.get("rows_per_batch"):
@@ -206,12 +219,13 @@ class AltertableWriter:
         return IngestTableMode.REPLACE
 
     def flush(self):
-        for stream, records in self.buffer.items():
-            if not records:
+        for stream, buffer in self.buffer.items():
+            buffer.convert_pending()
+            if not buffer.batches:
                 continue
 
             stream_config = self.streams[stream]
-            table = self._convert_records_to_pyarrow_table(stream, records)
+            table = pa.Table.from_batches(buffer.batches, schema=buffer.schema)
             mode = self._get_ingest_mode(stream, stream_config.sync_mode)
 
             with self.client.ingest(
