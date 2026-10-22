@@ -24,6 +24,8 @@ This page guides you through the process of setting up the [Altertable](https://
   - Port of the Altertable Flight SQL server. Defaults to `443`.
 - **Use TLS** _(optional)_
   - Whether to use TLS for the connection. Defaults to `true`. Recommended for production.
+- **Flush Threshold (MB)** _(optional)_
+  - Size of buffered records (as JSON) above which they are written to Altertable, without waiting for the next checkpoint. Peak memory is roughly 9x this value. Defaults to 1/20th of the container memory limit, or 100MB if there is no limit.
 
 ## Supported sync modes
 
