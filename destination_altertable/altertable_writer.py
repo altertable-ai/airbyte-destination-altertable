@@ -1,9 +1,11 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
 from logging import getLogger
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 import altertable_flightsql
+import orjson
 from altertable_flightsql.client import IngestIncrementalOptions, IngestTableMode
 import pyarrow as pa
 from airbyte_cdk.models import (
@@ -38,6 +40,41 @@ def quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+# Buffered records take ~9x their JSON size in memory at flush time (Python
+# objects, converted rows and the Arrow table all coexist), so flushing every
+# 1/20th of the memory limit keeps the peak around half of it.
+MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO = 20
+DEFAULT_FLUSH_THRESHOLD = 100 * 1024 * 1024
+
+CGROUP_V2_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory.max")
+CGROUP_V1_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+# cgroup v1 reports "no limit" as a page-aligned value close to 2**63.
+CGROUP_V1_UNLIMITED = 2**62
+
+
+def get_memory_limit() -> Optional[int]:
+    """Return the container memory limit in bytes, or None if unlimited or unknown."""
+    for path in (CGROUP_V2_MEMORY_LIMIT, CGROUP_V1_MEMORY_LIMIT):
+        try:
+            value = path.read_text().strip()
+        except OSError:
+            continue
+        if value == "max":
+            return None
+        limit = int(value)
+        return limit if limit < CGROUP_V1_UNLIMITED else None
+    return None
+
+
+def get_flush_threshold(config: Dict[str, Any]) -> int:
+    """Return the buffered size in bytes above which records are flushed."""
+    if flush_threshold_mb := config.get("flush_threshold_mb"):
+        return flush_threshold_mb * 1024 * 1024
+    if memory_limit := get_memory_limit():
+        return memory_limit // MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO
+    return DEFAULT_FLUSH_THRESHOLD
+
+
 @dataclass(frozen=True)
 class AirbyteStream:
     name: str
@@ -54,6 +91,8 @@ class AltertableWriter:
         self.config = config
         self.client = self._connect()
         self.buffer = defaultdict(list)
+        self.buffered_bytes = 0
+        self.flush_threshold = get_flush_threshold(config)
         self.streams: Dict[StreamKey, AirbyteStream] = {}
         self._replaced_streams: set[StreamKey] = set()
         self._created_schemas: set[str] = set()
@@ -129,6 +168,10 @@ class AltertableWriter:
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[(record.namespace, record.stream)].append(record)
+        self.buffered_bytes += len(orjson.dumps(record.data))
+
+    def should_flush(self) -> bool:
+        return self.buffered_bytes >= self.flush_threshold
 
     def complete_stream(self, namespace: Optional[str], name: str):
         self.flush()
@@ -292,3 +335,4 @@ class AltertableWriter:
             )
 
         self.buffer.clear()
+        self.buffered_bytes = 0
