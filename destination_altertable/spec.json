@@ -34,7 +34,7 @@
       "schema": {
         "title": "Schema",
         "type": "string",
-        "description": "The schema within the catalog to write data to.",
+        "description": "The default schema within the catalog to write data to. Streams with a namespace are written to the schema named after it.",
         "examples": ["main", "public"],
         "order": 3
       },

@@ -18,10 +18,17 @@ from .type_conversion import convert_to_arrow
 # we only have a message size average.
 MAX_BATCH_SIZE = 400 * 1024 * 1024
 
+StreamKey = tuple[Optional[str], str]
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
 
 @dataclass(frozen=True)
 class AirbyteStream:
     name: str
+    namespace: Optional[str]
     properties: dict[str, Any]
     sync_mode: DestinationSyncMode
     primary_key: list[str] = field(default_factory=list)
@@ -42,8 +49,9 @@ class AltertableWriter:
 
         self.config = config
         self.buffer = defaultdict(list)
-        self.streams: Dict[str, AirbyteStream] = {}
-        self._replaced_streams: set[str] = set()
+        self.streams: Dict[StreamKey, AirbyteStream] = {}
+        self._replaced_streams: set[StreamKey] = set()
+        self._created_schemas: set[str] = set()
 
     def __enter__(self):
         """Enter context manager"""
@@ -65,8 +73,9 @@ class AltertableWriter:
     def set_streams(self, catalog: ConfiguredAirbyteCatalog):
         self.streams.update(
             {
-                stream.stream.name: AirbyteStream(
+                (stream.stream.namespace, stream.stream.name): AirbyteStream(
                     name=stream.stream.name,
+                    namespace=stream.stream.namespace,
                     properties=stream.stream.json_schema["properties"],
                     sync_mode=stream.destination_sync_mode,
                     primary_key=self._get_primary_key(
@@ -85,7 +94,7 @@ class AltertableWriter:
         stream.read_all()
 
     def buffer_record(self, record: AirbyteRecordMessage):
-        self.buffer[record.stream].append(record)
+        self.buffer[(record.namespace, record.stream)].append(record)
 
     def _get_primary_key(self, primary_key: list[list[str]] | None) -> list[str]:
         if primary_key is None:
@@ -94,10 +103,24 @@ class AltertableWriter:
             raise NotImplementedError("Nested primary keys are not supported yet")
         return [pkey[0] for pkey in primary_key]
 
+    def _get_schema_name(self, stream_config: AirbyteStream) -> str:
+        return stream_config.namespace or self.config.get("schema", "")
+
+    def _ensure_schema(self, schema_name: str):
+        if schema_name in self._created_schemas:
+            return
+
+        catalog_name = self.config.get("catalog", "")
+        qualified_name = quote_identifier(schema_name)
+        if catalog_name:
+            qualified_name = f"{quote_identifier(catalog_name)}.{qualified_name}"
+        self.client.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_name}")
+        self._created_schemas.add(schema_name)
+
     def _convert_records_to_pyarrow_table(
-        self, stream: str, records: list[AirbyteRecordMessage]
+        self, stream_config: AirbyteStream, records: list[AirbyteRecordMessage]
     ) -> pa.Table:
-        properties = self.streams[stream].properties
+        properties = stream_config.properties
 
         fields = []
         converted_rows = [{} for _ in records]
@@ -155,27 +178,32 @@ class AltertableWriter:
         )
 
     def _get_ingest_mode(
-        self, stream: str, sync_mode: DestinationSyncMode
+        self, stream_key: StreamKey, sync_mode: DestinationSyncMode
     ) -> IngestTableMode:
         if sync_mode != DestinationSyncMode.overwrite:
             return IngestTableMode.CREATE_APPEND
-        if stream in self._replaced_streams:
+        if stream_key in self._replaced_streams:
             return IngestTableMode.CREATE_APPEND
         return IngestTableMode.REPLACE
 
     def flush(self):
-        for stream, records in self.buffer.items():
+        for stream_key, records in self.buffer.items():
             if not records:
                 continue
 
-            stream_config = self.streams[stream]
-            table = self._convert_records_to_pyarrow_table(stream, records)
-            mode = self._get_ingest_mode(stream, stream_config.sync_mode)
+            stream_config = self.streams[stream_key]
+            table = self._convert_records_to_pyarrow_table(stream_config, records)
+            mode = self._get_ingest_mode(stream_key, stream_config.sync_mode)
+
+            schema_name = self._get_schema_name(stream_config)
+            # The configured schema is expected to exist, namespaces are created on demand.
+            if stream_config.namespace:
+                self._ensure_schema(schema_name)
 
             with self.client.ingest(
-                table_name=stream,
+                table_name=stream_config.name,
                 schema=table.schema,
-                schema_name=self.config.get("schema", ""),
+                schema_name=schema_name,
                 catalog_name=self.config.get("catalog", ""),
                 mode=mode,
                 incremental_options=self._get_incremental_options(stream_config),
@@ -187,6 +215,6 @@ class AltertableWriter:
                     writer.write_batch(batch)
 
             if mode == IngestTableMode.REPLACE:
-                self._replaced_streams.add(stream)
+                self._replaced_streams.add(stream_key)
 
         self.buffer.clear()

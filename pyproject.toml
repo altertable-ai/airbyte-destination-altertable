@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "destination-altertable"
-version = "0.1.1"
+version = "0.1.2"
 description = "Destination implementation for Altertable."
 authors = ["Altertable <contact@altertable.ai>"]
 license = "ELv2"
