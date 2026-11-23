@@ -17,7 +17,7 @@ This page guides you through the process of setting up the [Altertable](https://
 - **Catalog**
   - The target catalog where data will be written.
 - **Schema**
-  - The schema within the catalog to write data to.
+  - The default schema within the catalog to write data to. Streams with a namespace are written to the schema named after it.
 - **Host** _(optional)_
   - Hostname of the Altertable Flight SQL server. Defaults to `flight.altertable.ai`.
 - **Port** _(optional)_
@@ -37,7 +37,7 @@ This page guides you through the process of setting up the [Altertable](https://
 
 ## Output schema
 
-Each stream is written to its own table within the configured catalog and schema. Columns are mapped from the source JSON schema to DuckDB types.
+Each stream is written to its own table within the configured catalog, in the schema matching its namespace (see [Namespace support](#namespace-support)). Columns are mapped from the source JSON schema to DuckDB types.
 
 ## Data type map
 
@@ -57,7 +57,7 @@ Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
 
 ## Namespace support
 
-This destination supports [namespaces](https://docs.airbyte.com/platform/using-airbyte/core-concepts/namespaces). The namespace maps to an Altertable schema.
+This destination supports [namespaces](https://docs.airbyte.com/platform/using-airbyte/core-concepts/namespaces). The namespace maps to an Altertable schema within the configured catalog, which is created if it does not exist. Streams without a namespace (e.g. when the connection uses the "Destination default" namespace) are written to the configured schema.
 
 ## Changelog
 
@@ -66,6 +66,7 @@ This destination supports [namespaces](https://docs.airbyte.com/platform/using-a
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
+| 0.1.2   | 2026-11-23 |              | Write streams to the schema matching their namespace |
 | 0.1.1   | 2026-11-23 | [18](https://github.com/altertable-ai/airbyte-destination-altertable/pull/18) | Bump altertable-flightsql to 0.4.1 to fix session options encoding |
 | 0.1.0   | 2026-04-08 |              | Initial release |
 

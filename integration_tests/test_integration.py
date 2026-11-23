@@ -4,6 +4,8 @@ Integration tests for DestinationAltertable using testcontainers.
 Uses ghcr.io/altertable-ai/altertable-mock to simulate the Altertable backend.
 """
 
+import uuid
+
 from airbyte_cdk.models import (
     AirbyteMessage,
     AirbyteRecordMessage,
@@ -38,6 +40,7 @@ def make_configured_catalog(
     primary_key: list[list[str]] | None = None,
     cursor_field: list[str] | None = None,
     source_defined_cursor: bool | None = None,
+    namespace: str | None = None,
 ) -> ConfiguredAirbyteCatalog:
     """Helper to create a ConfiguredAirbyteCatalog for testing."""
     return ConfiguredAirbyteCatalog(
@@ -45,6 +48,7 @@ def make_configured_catalog(
             ConfiguredAirbyteStream(
                 stream=AirbyteStream(
                     name=stream_name,
+                    namespace=namespace,
                     json_schema=json_schema,
                     supported_sync_modes=[SyncMode.full_refresh, SyncMode.incremental],
                     source_defined_primary_key=primary_key,
@@ -60,13 +64,14 @@ def make_configured_catalog(
 
 
 def make_record_message(
-    stream: str, data: dict, emitted_at: int = 1000
+    stream: str, data: dict, emitted_at: int = 1000, namespace: str | None = None
 ) -> AirbyteMessage:
     """Helper to create an AirbyteMessage with a record."""
     return AirbyteMessage(
         type=Type.RECORD,
         record=AirbyteRecordMessage(
             stream=stream,
+            namespace=namespace,
             data=data,
             emitted_at=emitted_at,
         ),
@@ -331,3 +336,45 @@ class TestAppendDedupSyncMode:
 
         # id=10 should be added
         assert results_by_id[10]["name"] == "New Person"
+
+
+class TestNamespaces:
+    """Test that stream namespaces map to Altertable schemas."""
+
+    def test_namespace_creates_schema_and_writes_into_it(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that a stream namespace is used as the schema, creating it if needed."""
+        catalog_name, schema_name, table_name = data
+        namespace = f"ns_{uuid.uuid4().hex[:8]}"
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.append,
+            json_schema=JSON_SCHEMA,
+            namespace=namespace,
+        )
+
+        records = [
+            make_record_message(
+                table_name,
+                {"id": 10, "name": "Namespaced", "created_at": "2024-01-01T00:00:00Z"},
+                namespace=namespace,
+            ),
+            make_state_message(table_name),
+        ]
+
+        messages = list(destination.write(test_config, catalog, iter(records)))
+        assert len(messages) == 1
+
+        results = query_table(client, catalog_name, namespace, table_name)
+        assert [r["id"] for r in results] == [10]
+
+        # The table in the configured schema is left untouched
+        results = query_table(client, catalog_name, schema_name, table_name)
+        assert {r["id"] for r in results} == {1, 2, 3}
