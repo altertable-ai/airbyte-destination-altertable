@@ -66,7 +66,7 @@ This destination supports [namespaces](https://docs.airbyte.com/platform/using-a
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
-| 0.1.2   | 2026-11-23 |              | Write streams to the schema matching their namespace |
+| 0.1.2   | 2026-11-23 | [19](https://github.com/altertable-ai/airbyte-destination-altertable/pull/19) | Write streams to the schema matching their namespace |
 | 0.1.1   | 2026-11-23 | [18](https://github.com/altertable-ai/airbyte-destination-altertable/pull/18) | Bump altertable-flightsql to 0.4.1 to fix session options encoding |
 | 0.1.0   | 2026-04-08 |              | Initial release |
 
