@@ -51,9 +51,12 @@ Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
 | `string` + `format: date-time` + `airbyte_type: timestamp_without_timezone` | `TIMESTAMP`     |
 | `string` + `format: time`                                                   | `TIME`          |
 | `integer`                                                                   | `BIGINT`        |
+| `number` + `airbyte_type: integer`                                          | `BIGINT`        |
 | `number`                                                                    | `DOUBLE`        |
 | `boolean`                                                                   | `BOOLEAN`       |
-| `object` / `array`                                                          | `JSON`          |
+| `object` / `array` / any other type                                         | `VARCHAR`       |
+
+Objects and arrays are stored as JSON-encoded strings.
 
 ## Namespace support
 
