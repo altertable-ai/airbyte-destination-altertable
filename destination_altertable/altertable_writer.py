@@ -125,7 +125,7 @@ class AltertableWriter:
     def _is_truncate(self, stream: ConfiguredAirbyteStream) -> bool:
         if stream.destination_sync_mode == DestinationSyncMode.overwrite:
             return True
-        # Refreshes that remove records and clears ask to drop all previous generations.
+        # A minimum generation of 0 asks to keep all previous generations.
         return bool(stream.minimum_generation_id) and (
             stream.minimum_generation_id == stream.generation_id
         )

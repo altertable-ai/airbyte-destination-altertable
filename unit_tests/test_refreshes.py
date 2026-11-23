@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Generator
 from unittest.mock import MagicMock, patch
 
+import pyarrow as pa
 import pytest
 from airbyte_cdk.models import (
     AirbyteRecordMessage,
@@ -78,7 +79,7 @@ def ingest_modes(client: MagicMock) -> list[IngestTableMode]:
     return [c.kwargs["mode"] for c in client.ingest.call_args_list]
 
 
-def written_batches(client: MagicMock) -> list:
+def written_batches(client: MagicMock) -> list[pa.RecordBatch]:
     writer = client.ingest.return_value.__enter__.return_value
     return [c.args[0] for c in writer.write_batch.call_args_list]
 

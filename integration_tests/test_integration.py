@@ -467,6 +467,7 @@ class TestRefreshes:
             make_stream_complete_message(table_name),
         ]
 
-        list(destination.write(test_config, catalog, iter(input_messages)))
+        messages = list(destination.write(test_config, catalog, iter(input_messages)))
+        assert len(messages) == 1
 
         assert query_table(client, catalog_name, schema_name, table_name) == []
