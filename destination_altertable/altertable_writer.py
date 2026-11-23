@@ -18,8 +18,6 @@ from .type_conversion import convert_to_arrow
 # we only have a message size average.
 MAX_BATCH_SIZE = 400 * 1024 * 1024
 
-# Streams are identified by their namespace and name: two streams can share a
-# name as long as they live in different namespaces.
 StreamKey = tuple[Optional[str], str]
 
 
