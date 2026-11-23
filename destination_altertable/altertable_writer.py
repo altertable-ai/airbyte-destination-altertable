@@ -8,6 +8,7 @@ import pyarrow as pa
 from airbyte_cdk.models import (
     AirbyteRecordMessage,
     ConfiguredAirbyteCatalog,
+    ConfiguredAirbyteStream,
     DestinationSyncMode,
 )
 
@@ -31,6 +32,7 @@ class AirbyteStream:
     namespace: Optional[str]
     properties: dict[str, Any]
     sync_mode: DestinationSyncMode
+    truncate: bool
     primary_key: list[str] = field(default_factory=list)
     cursor_field: list[str] = field(default_factory=list)
 
@@ -78,6 +80,7 @@ class AltertableWriter:
                     namespace=stream.stream.namespace,
                     properties=stream.stream.json_schema["properties"],
                     sync_mode=stream.destination_sync_mode,
+                    truncate=self._is_truncate(stream),
                     primary_key=self._get_primary_key(
                         stream.primary_key or stream.stream.source_defined_primary_key
                     ),
@@ -95,6 +98,37 @@ class AltertableWriter:
 
     def buffer_record(self, record: AirbyteRecordMessage):
         self.buffer[(record.namespace, record.stream)].append(record)
+
+    def complete_stream(self, namespace: Optional[str], name: str):
+        self.flush()
+
+        stream_key = (namespace, name)
+        stream_config = self.streams.get(stream_key)
+        if (
+            stream_config is None
+            or not stream_config.truncate
+            or stream_key in self._replaced_streams
+        ):
+            return
+
+        # The stream received no records (e.g. a clear): replace the table with
+        # an empty one. The server ignores ingests without any batch.
+        schema = self._convert_records_to_pyarrow_table(stream_config, []).schema
+        self._ingest(
+            stream_key,
+            stream_config,
+            schema,
+            [pa.RecordBatch.from_pylist([], schema=schema)],
+            incremental_options=None,
+        )
+
+    def _is_truncate(self, stream: ConfiguredAirbyteStream) -> bool:
+        if stream.destination_sync_mode == DestinationSyncMode.overwrite:
+            return True
+        # Refreshes that remove records and clears ask to drop all previous generations.
+        return bool(stream.minimum_generation_id) and (
+            stream.minimum_generation_id == stream.generation_id
+        )
 
     def _get_primary_key(self, primary_key: list[list[str]] | None) -> list[str]:
         if primary_key is None:
@@ -178,13 +212,42 @@ class AltertableWriter:
         )
 
     def _get_ingest_mode(
-        self, stream_key: StreamKey, sync_mode: DestinationSyncMode
+        self, stream_key: StreamKey, stream_config: AirbyteStream
     ) -> IngestTableMode:
-        if sync_mode != DestinationSyncMode.overwrite:
+        if not stream_config.truncate:
             return IngestTableMode.CREATE_APPEND
         if stream_key in self._replaced_streams:
             return IngestTableMode.CREATE_APPEND
         return IngestTableMode.REPLACE
+
+    def _ingest(
+        self,
+        stream_key: StreamKey,
+        stream_config: AirbyteStream,
+        schema: pa.Schema,
+        batches: list[pa.RecordBatch],
+        incremental_options: Optional[IngestIncrementalOptions],
+    ):
+        mode = self._get_ingest_mode(stream_key, stream_config)
+
+        schema_name = self._get_schema_name(stream_config)
+        # The configured schema is expected to exist, namespaces are created on demand.
+        if stream_config.namespace:
+            self._ensure_schema(schema_name)
+
+        with self.client.ingest(
+            table_name=stream_config.name,
+            schema=schema,
+            schema_name=schema_name,
+            catalog_name=self.config.get("catalog", ""),
+            mode=mode,
+            incremental_options=incremental_options,
+        ) as writer:
+            for batch in batches:
+                writer.write_batch(batch)
+
+        if mode == IngestTableMode.REPLACE:
+            self._replaced_streams.add(stream_key)
 
     def flush(self):
         for stream_key, records in self.buffer.items():
@@ -193,28 +256,13 @@ class AltertableWriter:
 
             stream_config = self.streams[stream_key]
             table = self._convert_records_to_pyarrow_table(stream_config, records)
-            mode = self._get_ingest_mode(stream_key, stream_config.sync_mode)
-
-            schema_name = self._get_schema_name(stream_config)
-            # The configured schema is expected to exist, namespaces are created on demand.
-            if stream_config.namespace:
-                self._ensure_schema(schema_name)
-
-            with self.client.ingest(
-                table_name=stream_config.name,
-                schema=table.schema,
-                schema_name=schema_name,
-                catalog_name=self.config.get("catalog", ""),
-                mode=mode,
-                incremental_options=self._get_incremental_options(stream_config),
-            ) as writer:
-                estimated_rows_per_batch = self._estimate_rows_per_batch(table)
-                batches = table.to_batches(max_chunksize=estimated_rows_per_batch)
-
-                for batch in batches:
-                    writer.write_batch(batch)
-
-            if mode == IngestTableMode.REPLACE:
-                self._replaced_streams.add(stream_key)
+            estimated_rows_per_batch = self._estimate_rows_per_batch(table)
+            self._ingest(
+                stream_key,
+                stream_config,
+                table.schema,
+                table.to_batches(max_chunksize=estimated_rows_per_batch),
+                self._get_incremental_options(stream_config),
+            )
 
         self.buffer.clear()

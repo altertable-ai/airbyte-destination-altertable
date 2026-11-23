@@ -59,6 +59,16 @@ Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
 
 This destination supports [namespaces](https://docs.airbyte.com/platform/using-airbyte/core-concepts/namespaces). The namespace maps to an Altertable schema within the configured catalog, which is created if it does not exist. Streams without a namespace (e.g. when the connection uses the "Destination default" namespace) are written to the configured schema.
 
+## Refreshes and clears
+
+This destination supports [refreshes](https://docs.airbyte.com/platform/operator-guides/refreshes) and [clears](https://docs.airbyte.com/platform/operator-guides/clear):
+
+- **Refresh and retain records** appends the reloaded records to the existing table.
+- **Refresh and remove records** replaces the table when the first batch of reloaded records is written, so previous records are no longer available while the rest of the refresh runs.
+- **Clear** empties the table once the sync completes.
+
+Records are not tagged with an `_airbyte_generation_id` column.
+
 ## Changelog
 
 <details>
@@ -66,6 +76,7 @@ This destination supports [namespaces](https://docs.airbyte.com/platform/using-a
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
+| 0.1.3   | 2026-11-23 |              | Support refreshes and clears |
 | 0.1.2   | 2026-11-23 | [19](https://github.com/altertable-ai/airbyte-destination-altertable/pull/19) | Write streams to the schema matching their namespace |
 | 0.1.1   | 2026-11-23 | [18](https://github.com/altertable-ai/airbyte-destination-altertable/pull/18) | Bump altertable-flightsql to 0.4.1 to fix session options encoding |
 | 0.1.0   | 2026-04-08 |              | Initial release |
