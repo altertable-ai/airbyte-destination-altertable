@@ -76,7 +76,7 @@ Records are not tagged with an `_airbyte_generation_id` column.
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
-| 0.1.3   | 2026-11-23 |              | Support refreshes and clears |
+| 0.1.3   | 2026-11-23 | [20](https://github.com/altertable-ai/airbyte-destination-altertable/pull/20) | Support refreshes and clears |
 | 0.1.2   | 2026-11-23 | [19](https://github.com/altertable-ai/airbyte-destination-altertable/pull/19) | Write streams to the schema matching their namespace |
 | 0.1.1   | 2026-11-23 | [18](https://github.com/altertable-ai/airbyte-destination-altertable/pull/18) | Bump altertable-flightsql to 0.4.1 to fix session options encoding |
 | 0.1.0   | 2026-04-08 |              | Initial release |
