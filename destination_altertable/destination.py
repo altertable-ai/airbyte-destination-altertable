@@ -10,8 +10,10 @@ from airbyte_cdk.models import (
     AirbyteConnectionStatus,
     AirbyteMessage,
     AirbyteStateMessage,
+    AirbyteStreamStatus,
     ConfiguredAirbyteCatalog,
     Status,
+    TraceType,
     Type,
 )
 from airbyte_cdk.models.airbyte_protocol_serializers import custom_type_resolver
@@ -74,6 +76,14 @@ class DestinationAltertable(Destination):
                 elif message.type == Type.STATE:
                     writer.flush()
                     yield message
+                elif (
+                    message.type == Type.TRACE
+                    and message.trace.type == TraceType.STREAM_STATUS
+                    and message.trace.stream_status.status
+                    == AirbyteStreamStatus.COMPLETE
+                ):
+                    descriptor = message.trace.stream_status.stream_descriptor
+                    writer.complete_stream(descriptor.namespace, descriptor.name)
 
     @override
     def run(self, args: list[str]) -> None:

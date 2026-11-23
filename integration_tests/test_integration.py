@@ -12,12 +12,16 @@ from airbyte_cdk.models import (
     AirbyteStateMessage,
     AirbyteStream,
     AirbyteStreamState,
+    AirbyteStreamStatus,
+    AirbyteStreamStatusTraceMessage,
+    AirbyteTraceMessage,
     ConfiguredAirbyteCatalog,
     ConfiguredAirbyteStream,
     DestinationSyncMode,
     Status,
     StreamDescriptor,
     SyncMode,
+    TraceType,
     Type,
 )
 
@@ -41,6 +45,8 @@ def make_configured_catalog(
     cursor_field: list[str] | None = None,
     source_defined_cursor: bool | None = None,
     namespace: str | None = None,
+    generation_id: int | None = None,
+    minimum_generation_id: int | None = None,
 ) -> ConfiguredAirbyteCatalog:
     """Helper to create a ConfiguredAirbyteCatalog for testing."""
     return ConfiguredAirbyteCatalog(
@@ -58,6 +64,8 @@ def make_configured_catalog(
                 destination_sync_mode=destination_sync_mode,
                 primary_key=primary_key,
                 cursor_field=cursor_field,
+                generation_id=generation_id,
+                minimum_generation_id=minimum_generation_id,
             )
         ]
     )
@@ -85,6 +93,21 @@ def make_state_message(stream: str) -> AirbyteMessage:
         state=AirbyteStateMessage(
             stream=AirbyteStreamState(
                 stream_descriptor=StreamDescriptor(name=stream),
+            ),
+        ),
+    )
+
+
+def make_stream_complete_message(stream: str) -> AirbyteMessage:
+    """Helper to create the stream completion message sent by the platform."""
+    return AirbyteMessage(
+        type=Type.TRACE,
+        trace=AirbyteTraceMessage(
+            type=TraceType.STREAM_STATUS,
+            emitted_at=1000,
+            stream_status=AirbyteStreamStatusTraceMessage(
+                stream_descriptor=StreamDescriptor(name=stream),
+                status=AirbyteStreamStatus.COMPLETE,
             ),
         ),
     )
@@ -378,3 +401,73 @@ class TestNamespaces:
         # The table in the configured schema is left untouched
         results = query_table(client, catalog_name, schema_name, table_name)
         assert {r["id"] for r in results} == {1, 2, 3}
+
+
+class TestRefreshes:
+    """Test refreshes and clears, driven by the stream generations."""
+
+    def test_refresh_removing_records_replaces_existing_data(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that a refresh removing records only keeps the newly synced records."""
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.append_dedup,
+            json_schema=JSON_SCHEMA,
+            primary_key=PRIMARY_KEY,
+            cursor_field=CURSOR_FIELD,
+            source_defined_cursor=True,
+            generation_id=2,
+            minimum_generation_id=2,
+        )
+
+        input_messages = [
+            make_record_message(
+                table_name,
+                {"id": 1, "name": "Refreshed", "created_at": "2024-01-01T00:00:00Z"},
+            ),
+            make_state_message(table_name),
+            make_stream_complete_message(table_name),
+        ]
+
+        messages = list(destination.write(test_config, catalog, iter(input_messages)))
+        assert len(messages) == 1
+
+        results = query_table(client, catalog_name, schema_name, table_name)
+        assert [(r["id"], r["name"]) for r in results] == [(1, "Refreshed")]
+
+    def test_clear_empties_the_table(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that a clear, which sends no records, empties the table."""
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.append,
+            json_schema=JSON_SCHEMA,
+            generation_id=2,
+            minimum_generation_id=2,
+        )
+
+        input_messages = [
+            make_state_message(table_name),
+            make_stream_complete_message(table_name),
+        ]
+
+        messages = list(destination.write(test_config, catalog, iter(input_messages)))
+        assert len(messages) == 1
+
+        assert query_table(client, catalog_name, schema_name, table_name) == []

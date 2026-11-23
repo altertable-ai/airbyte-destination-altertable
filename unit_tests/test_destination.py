@@ -8,12 +8,16 @@ from airbyte_cdk.models import (
     AirbyteStateMessage,
     AirbyteStream,
     AirbyteStreamState,
+    AirbyteStreamStatus,
+    AirbyteStreamStatusTraceMessage,
+    AirbyteTraceMessage,
     ConfiguredAirbyteCatalog,
     ConfiguredAirbyteStream,
     DestinationSyncMode,
     Status,
     StreamDescriptor,
     SyncMode,
+    TraceType,
     Type,
 )
 
@@ -154,6 +158,38 @@ def test_write_flushes_on_each_state(mock_writer_class) -> None:
     assert len(result) == 2
     assert mock_writer.flush.call_count == 2
     assert mock_writer.buffer_record.call_count == 2
+
+
+@patch("destination_altertable.destination.AltertableWriter")
+def test_write_completes_streams_on_complete_status(mock_writer_class) -> None:
+    mock_writer = MagicMock()
+    mock_writer_class.return_value.__enter__.return_value = mock_writer
+
+    def make_status(status: AirbyteStreamStatus):
+        return AirbyteMessage(
+            type=Type.TRACE,
+            trace=AirbyteTraceMessage(
+                type=TraceType.STREAM_STATUS,
+                emitted_at=1000,
+                stream_status=AirbyteStreamStatusTraceMessage(
+                    stream_descriptor=StreamDescriptor(
+                        name="test_table", namespace="my_namespace"
+                    ),
+                    status=status,
+                ),
+            ),
+        )
+
+    messages = [
+        make_status(AirbyteStreamStatus.STARTED),
+        make_status(AirbyteStreamStatus.COMPLETE),
+    ]
+
+    destination = DestinationAltertable()
+    result = list(destination.write(CONFIG, CATALOG, messages))
+
+    assert result == []
+    mock_writer.complete_stream.assert_called_once_with("my_namespace", "test_table")
 
 
 @patch("destination_altertable.destination.AltertableWriter")
