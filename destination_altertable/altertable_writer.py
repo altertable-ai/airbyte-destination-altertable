@@ -13,7 +13,7 @@ from airbyte_cdk.models import (
     DestinationSyncMode,
 )
 
-from .type_conversion import convert_to_arrow
+from .type_conversion import convert_column_to_arrow
 
 
 # Maximum GRPC message size is 512MB. We use 400MB as a safety margin because
@@ -193,22 +193,12 @@ class AltertableWriter:
         converted_rows = [{} for _ in records]
 
         for field_name, prop in properties.items():
-            # Get the first non-null value to determine type (or use None)
-            sample_value = next(
-                (
-                    r.data.get(field_name)
-                    for r in records
-                    if r.data.get(field_name) is not None
-                ),
-                None,
+            pa_type, converted = convert_column_to_arrow(
+                [r.data.get(field_name) for r in records], prop
             )
-            pa_type, _ = convert_to_arrow(sample_value, prop)
             fields.append((field_name, pa_type))
-
-            # Convert all values for this field
-            for i, record in enumerate(records):
-                _, converted = convert_to_arrow(record.data.get(field_name), prop)
-                converted_rows[i][field_name] = converted
+            for row, value in zip(converted_rows, converted):
+                row[field_name] = value
 
         schema = pa.schema(fields)
         return pa.Table.from_pylist(converted_rows, schema=schema)

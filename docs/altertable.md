@@ -58,6 +58,8 @@ Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
 
 Objects and arrays are stored as JSON-encoded strings.
 
+A `number` column is created as `BIGINT` instead of `DOUBLE` when the first records written to it are all integers and some are beyond ±2^53, which `DOUBLE` can't represent exactly (e.g. IDs). Existing columns keep their type: refresh the stream to recreate them.
+
 ## Namespace support
 
 This destination supports [namespaces](https://docs.airbyte.com/platform/using-airbyte/core-concepts/namespaces). The namespace maps to an Altertable schema within the configured catalog, which is created if it does not exist. Streams without a namespace (e.g. when the connection uses the "Destination default" namespace) are written to the configured schema.
@@ -79,6 +81,7 @@ Records are not tagged with an `_airbyte_generation_id` column.
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
+| 0.1.5   | 2026-11-24 | [22](https://github.com/altertable-ai/airbyte-destination-altertable/pull/22) | Keep large integers exact in `number` columns |
 | 0.1.4   | 2026-11-24 | [21](https://github.com/altertable-ai/airbyte-destination-altertable/pull/21) | Reopen the Flight session when it expires during a sync |
 | 0.1.3   | 2026-11-23 | [20](https://github.com/altertable-ai/airbyte-destination-altertable/pull/20) | Support refreshes and clears |
 | 0.1.2   | 2026-11-23 | [19](https://github.com/altertable-ai/airbyte-destination-altertable/pull/19) | Write streams to the schema matching their namespace |

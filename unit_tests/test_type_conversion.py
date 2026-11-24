@@ -5,6 +5,7 @@ from datetime import date, datetime, time
 import pyarrow as pa
 
 from destination_altertable.type_conversion import (
+    convert_column_to_arrow,
     convert_to_arrow,
     parse_date,
     parse_time,
@@ -408,3 +409,48 @@ class TestConvertRecordsToPyArrowTable:
         assert table.num_rows == 2
         assert table.column("id").to_pylist() == [1, 2]
         assert table.column("optional_timestamp").to_pylist() == [None, None]
+
+
+TIKTOK_AD_ID = 7628540698668761000
+
+
+class TestConvertColumnToArrowNumber:
+    """Tests for convert_column_to_arrow with `number` columns."""
+
+    def test_floats(self):
+        pa_type, values = convert_column_to_arrow([1.5, None, 2], {"type": "number"})
+        assert pa_type == pa.float64()
+        assert values == [1.5, None, 2.0]
+
+    def test_integers_exactly_representable_as_float64(self):
+        pa_type, values = convert_column_to_arrow(
+            [1, 2**53], {"type": ["null", "number"]}
+        )
+        assert pa_type == pa.float64()
+        assert values == [1.0, 2.0**53]
+
+    def test_integers_beyond_float64_precision(self):
+        pa_type, values = convert_column_to_arrow(
+            [TIKTOK_AD_ID, None, 2.0], {"type": ["null", "number"]}
+        )
+        assert pa_type == pa.int64()
+        assert values == [TIKTOK_AD_ID, None, 2]
+
+    def test_integers_beyond_float64_precision_with_fractions(self):
+        pa_type, values = convert_column_to_arrow(
+            [TIKTOK_AD_ID, 1.5], {"type": "number"}
+        )
+        assert pa_type == pa.float64()
+        assert values == [float(TIKTOK_AD_ID), 1.5]
+
+    def test_integers_beyond_int64(self):
+        pa_type, values = convert_column_to_arrow([2**64], {"type": "number"})
+        assert pa_type == pa.float64()
+        assert values == [float(2**64)]
+
+    def test_airbyte_integer(self):
+        pa_type, values = convert_column_to_arrow(
+            [TIKTOK_AD_ID], {"type": "number", "airbyte_type": "integer"}
+        )
+        assert pa_type == pa.int64()
+        assert values == [TIKTOK_AD_ID]
