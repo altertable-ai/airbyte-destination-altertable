@@ -1,6 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from logging import getLogger
+from typing import Any, Callable, Dict, Optional, TypeVar
 
 import altertable_flightsql
 from altertable_flightsql.client import IngestIncrementalOptions, IngestTableMode
@@ -19,7 +20,18 @@ from .type_conversion import convert_to_arrow
 # we only have a message size average.
 MAX_BATCH_SIZE = 400 * 1024 * 1024
 
+SESSION_EXPIRED_MESSAGE = "Session expired"
+
 StreamKey = tuple[Optional[str], str]
+
+T = TypeVar("T")
+
+logger = getLogger("airbyte")
+
+
+def is_session_expired(exc: BaseException) -> bool:
+    """True when the server no longer knows the Flight session (e.g. it expired while idle)."""
+    return isinstance(exc, pa.ArrowException) and SESSION_EXPIRED_MESSAGE in str(exc)
 
 
 def quote_identifier(identifier: str) -> str:
@@ -39,17 +51,8 @@ class AirbyteStream:
 
 class AltertableWriter:
     def __init__(self, config: Dict[str, Any]):
-        self.client = altertable_flightsql.Client(
-            username=config["username"],
-            password=config["password"],
-            host=config["host"],
-            port=config["port"],
-            tls=config.get("tls", True),
-            catalog=config.get("catalog"),
-            schema=config.get("schema"),
-        )
-
         self.config = config
+        self.client = self._connect()
         self.buffer = defaultdict(list)
         self.streams: Dict[StreamKey, AirbyteStream] = {}
         self._replaced_streams: set[StreamKey] = set()
@@ -71,6 +74,34 @@ class AltertableWriter:
                 self.client.close()
             except Exception:
                 pass  # Ignore errors on close
+
+    def _connect(self) -> altertable_flightsql.Client:
+        return altertable_flightsql.Client(
+            username=self.config["username"],
+            password=self.config["password"],
+            host=self.config["host"],
+            port=self.config["port"],
+            tls=self.config.get("tls", True),
+            catalog=self.config.get("catalog"),
+            schema=self.config.get("schema"),
+        )
+
+    def _with_session_retry(self, call: Callable[[], T]) -> T:
+        """Run `call`, opening a new Flight session and retrying once if the session expired.
+
+        The session expires when the source keeps the destination idle for longer than the
+        server's lease TTL (e.g. while reading a large stream). The server rejects an expired
+        session before running anything, so the retry can't apply a write twice.
+        """
+        try:
+            return call()
+        except Exception as e:
+            if not is_session_expired(e):
+                raise
+        logger.warning("Flight session expired; opening a new session")
+        self.close()
+        self.client = self._connect()
+        return call()
 
     def set_streams(self, catalog: ConfiguredAirbyteCatalog):
         self.streams.update(
@@ -148,7 +179,9 @@ class AltertableWriter:
         qualified_name = quote_identifier(schema_name)
         if catalog_name:
             qualified_name = f"{quote_identifier(catalog_name)}.{qualified_name}"
-        self.client.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_name}")
+        self._with_session_retry(
+            lambda: self.client.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_name}")
+        )
         self._created_schemas.add(schema_name)
 
     def _convert_records_to_pyarrow_table(
@@ -235,16 +268,19 @@ class AltertableWriter:
         if stream_config.namespace:
             self._ensure_schema(schema_name)
 
-        with self.client.ingest(
-            table_name=stream_config.name,
-            schema=schema,
-            schema_name=schema_name,
-            catalog_name=self.config.get("catalog", ""),
-            mode=mode,
-            incremental_options=incremental_options,
-        ) as writer:
-            for batch in batches:
-                writer.write_batch(batch)
+        def write():
+            with self.client.ingest(
+                table_name=stream_config.name,
+                schema=schema,
+                schema_name=schema_name,
+                catalog_name=self.config.get("catalog", ""),
+                mode=mode,
+                incremental_options=incremental_options,
+            ) as writer:
+                for batch in batches:
+                    writer.write_batch(batch)
+
+        self._with_session_retry(write)
 
         if mode == IngestTableMode.REPLACE:
             self._replaced_streams.add(stream_key)
