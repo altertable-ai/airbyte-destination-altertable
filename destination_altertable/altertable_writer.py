@@ -1,5 +1,8 @@
+import json
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from logging import getLogger
 from typing import Any, Callable, Dict, Optional, TypeVar
 
@@ -21,6 +24,14 @@ from .type_conversion import convert_column_to_arrow
 MAX_BATCH_SIZE = 400 * 1024 * 1024
 
 SESSION_EXPIRED_MESSAGE = "Session expired"
+
+# Metadata columns written to every table, as in Airbyte's Destinations V2.
+AIRBYTE_META_FIELDS = [
+    ("_airbyte_raw_id", pa.string()),
+    ("_airbyte_extracted_at", pa.timestamp("us", tz="UTC")),
+    ("_airbyte_meta", pa.string()),
+    ("_airbyte_generation_id", pa.int64()),
+]
 
 StreamKey = tuple[Optional[str], str]
 
@@ -47,6 +58,8 @@ class AirbyteStream:
     truncate: bool
     primary_key: list[str] = field(default_factory=list)
     cursor_field: list[str] = field(default_factory=list)
+    generation_id: int = 0
+    sync_id: Optional[int] = None
 
 
 class AltertableWriter:
@@ -118,6 +131,8 @@ class AltertableWriter:
                     cursor_field=stream.cursor_field
                     or stream.stream.source_defined_cursor
                     or [],
+                    generation_id=stream.generation_id or 0,
+                    sync_id=stream.sync_id,
                 )
                 for stream in catalog.streams
             }
@@ -200,8 +215,32 @@ class AltertableWriter:
             for row, value in zip(converted_rows, converted):
                 row[field_name] = value
 
+        for row, record in zip(converted_rows, records):
+            row.update(self._airbyte_meta_values(stream_config, record))
+        fields.extend(AIRBYTE_META_FIELDS)
+
         schema = pa.schema(fields)
         return pa.Table.from_pylist(converted_rows, schema=schema)
+
+    def _airbyte_meta_values(
+        self, stream_config: AirbyteStream, record: AirbyteRecordMessage
+    ) -> dict[str, Any]:
+        changes = (record.meta.changes if record.meta else None) or []
+        meta = {
+            "changes": [
+                {"field": c.field, "change": c.change.value, "reason": c.reason.value}
+                for c in changes
+            ],
+            "sync_id": stream_config.sync_id,
+        }
+        return {
+            "_airbyte_raw_id": str(uuid.uuid4()),
+            "_airbyte_extracted_at": datetime.fromtimestamp(
+                record.emitted_at / 1000, tz=timezone.utc
+            ),
+            "_airbyte_meta": json.dumps(meta),
+            "_airbyte_generation_id": stream_config.generation_id,
+        }
 
     def _estimate_rows_per_batch(self, table: pa.Table) -> int:
         if rows_per_batch := self.config.get("rows_per_batch"):

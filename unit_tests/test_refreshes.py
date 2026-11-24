@@ -118,7 +118,14 @@ def test_clear_replaces_the_table_with_an_empty_one(client: MagicMock) -> None:
     assert client.ingest.call_args.kwargs["table_name"] == "users"
     [batch] = written_batches(client)
     assert batch.num_rows == 0
-    assert batch.schema.names == ["id", "name"]
+    assert batch.schema.names == [
+        "id",
+        "name",
+        "_airbyte_raw_id",
+        "_airbyte_extracted_at",
+        "_airbyte_meta",
+        "_airbyte_generation_id",
+    ]
 
 
 def test_complete_flushes_buffered_records(client: MagicMock) -> None:

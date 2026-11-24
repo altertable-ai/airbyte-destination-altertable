@@ -39,6 +39,15 @@ This page guides you through the process of setting up the [Altertable](https://
 
 Each stream is written to its own table within the configured catalog, in the schema matching its namespace (see [Namespace support](#namespace-support)). Columns are mapped from the source JSON schema to DuckDB types.
 
+Every table also gets the standard Airbyte metadata columns:
+
+| Column                   | Type          | Description                                                                 |
+| :----------------------- | :------------ | :-------------------------------------------------------------------------- |
+| `_airbyte_raw_id`        | `VARCHAR`     | A UUID generated for each record.                                           |
+| `_airbyte_extracted_at`  | `TIMESTAMPTZ` | When the source extracted the record.                                       |
+| `_airbyte_meta`          | `VARCHAR`     | JSON with the record's `changes` (e.g. truncated or nulled values) and `sync_id`. |
+| `_airbyte_generation_id` | `BIGINT`      | The stream generation the record was written in (incremented by refreshes). |
+
 ## Data type map
 
 Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:

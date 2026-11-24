@@ -74,6 +74,7 @@ def test_flush_keeps_integers_beyond_float64_precision(client: MagicMock) -> Non
     writer.flush()
 
     [batch] = written_batches(client)
+    batch = batch.select(["ad_id", "spend"])
     assert batch.schema == pa.schema([("ad_id", pa.int64()), ("spend", pa.float64())])
     assert batch.to_pylist() == [
         {"ad_id": TIKTOK_AD_ID, "spend": 12.5},
