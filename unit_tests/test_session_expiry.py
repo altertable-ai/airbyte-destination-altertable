@@ -125,16 +125,16 @@ def test_expired_session_reopens_and_retries_the_ingest(
 def test_expired_session_reopens_and_retries_schema_creation(
     clients: list[MagicMock],
 ) -> None:
-    writer = make_writer(make_stream(namespace="zendesk"))
+    writer = make_writer(make_stream(namespace="sales"))
     clients[0].execute.side_effect = SESSION_EXPIRED
 
-    writer.buffer_record(make_record(1, namespace="zendesk"))
+    writer.buffer_record(make_record(1, namespace="sales"))
     writer.flush()
 
     assert len(clients) == 2
     renewed = clients[1]
     renewed.execute.assert_called_once_with(
-        'CREATE SCHEMA IF NOT EXISTS "my_catalog"."zendesk"'
+        'CREATE SCHEMA IF NOT EXISTS "my_catalog"."sales"'
     )
     renewed.ingest.assert_called_once()
     clients[0].ingest.assert_not_called()
@@ -159,12 +159,12 @@ def test_other_errors_are_raised_without_reopening(
 def test_session_expiring_again_after_reopening_is_raised(
     clients: list[MagicMock],
 ) -> None:
-    writer = make_writer(make_stream(namespace="zendesk"))
+    writer = make_writer(make_stream(namespace="sales"))
     still_expired = MagicMock()
     still_expired.execute.side_effect = SESSION_EXPIRED
     clients[0].execute.side_effect = SESSION_EXPIRED
 
-    writer.buffer_record(make_record(1, namespace="zendesk"))
+    writer.buffer_record(make_record(1, namespace="sales"))
     with patch.object(writer, "_connect", return_value=still_expired) as reconnect:
         with pytest.raises(flight.FlightServerError, match="Session expired"):
             writer.flush()
