@@ -15,29 +15,6 @@ MAX_EXACT_FLOAT_INTEGER = 2**53
 INT64_RANGE = range(-(2**63), 2**63)
 
 
-def convert_column_to_arrow(
-    values: list[Any], property_schema: dict
-) -> tuple[pa.DataType, list[Any]]:
-    """Convert the values of a column to a PyArrow type and values.
-
-    `number` columns are float64, except when all their values are integers and some
-    can't be represented exactly as float64 (e.g. IDs): those columns are int64.
-
-    Args:
-        values: The column values, one per record (None for missing values).
-        property_schema: The Airbyte JSON schema for the property.
-
-    Returns:
-        A tuple of (PyArrow type, converted values).
-    """
-    if is_number_column(property_schema):
-        return convert_number_column(values)
-
-    sample_value = next((v for v in values if v is not None), None)
-    pa_type, _ = convert_to_arrow(sample_value, property_schema)
-    return pa_type, [convert_to_arrow(v, property_schema)[1] for v in values]
-
-
 def is_number_column(property_schema: dict) -> bool:
     """Whether the column type depends on its values (see `convert_number_column`)."""
     return (
@@ -74,6 +51,11 @@ def unify_number_columns(batches: list[pa.RecordBatch]) -> list[pa.RecordBatch]:
 
 
 def convert_number_column(values: list[Any]) -> tuple[pa.DataType, list[Any]]:
+    """Convert the values of a `number` column to a PyArrow type and values.
+
+    `number` columns are float64, except when all their values are integers and some
+    can't be represented exactly as float64 (e.g. IDs): those columns are int64.
+    """
     present = [v for v in values if v is not None]
     if all(is_integral(v) and int(v) in INT64_RANGE for v in present) and any(
         type(v) is int and abs(v) > MAX_EXACT_FLOAT_INTEGER for v in present

@@ -83,6 +83,7 @@ Records are not tagged with an `_airbyte_generation_id` column.
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
+| 0.1.6   | 2026-11-24 | [17](https://github.com/altertable-ai/airbyte-destination-altertable/pull/17) | Flush buffered records before the next checkpoint once they reach a size limit |
 | 0.1.5   | 2026-11-24 | [22](https://github.com/altertable-ai/airbyte-destination-altertable/pull/22) | Keep large integers exact in `number` columns |
 | 0.1.4   | 2026-11-24 | [21](https://github.com/altertable-ai/airbyte-destination-altertable/pull/21) | Reopen the Flight session when it expires during a sync |
 | 0.1.3   | 2026-11-23 | [20](https://github.com/altertable-ai/airbyte-destination-altertable/pull/20) | Support refreshes and clears |
