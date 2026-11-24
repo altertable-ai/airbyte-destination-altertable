@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Generator
 from unittest.mock import MagicMock, patch
 
@@ -42,14 +41,12 @@ def client() -> Generator[MagicMock, None, None]:
 def make_writer() -> AltertableWriter:
     stream = ConfiguredAirbyteStream(
         stream=AirbyteStream(
-            name="ads_reports_daily",
+            name="ads",
             json_schema={
                 "type": "object",
                 "properties": {
                     "ad_id": {"type": ["null", "number"]},
-                    "advertiser_id": {"type": "number"},
                     "spend": {"type": ["null", "number"]},
-                    "campaign_budget": {"type": ["null", "number"]},
                 },
             },
             supported_sync_modes=[SyncMode.incremental],
@@ -69,47 +66,16 @@ def written_batches(client: MagicMock) -> list[pa.RecordBatch]:
 
 def test_flush_keeps_integers_beyond_float64_precision(client: MagicMock) -> None:
     writer = make_writer()
-    rows = [
-        {
-            "ad_id": TIKTOK_AD_ID,
-            "advertiser_id": TIKTOK_AD_ID + 1,
-            "spend": 12.5,
-            "campaign_budget": TIKTOK_AD_ID,
-        },
-        {
-            "ad_id": None,
-            "advertiser_id": 1,
-            "spend": 3,
-            "campaign_budget": 99.99,
-        },
-    ]
-    for row in rows:
+    for data in [{"ad_id": TIKTOK_AD_ID, "spend": 12.5}, {"ad_id": None, "spend": 3}]:
         writer.buffer_record(
-            AirbyteRecordMessage(stream="ads_reports_daily", data=row, emitted_at=1000)
+            AirbyteRecordMessage(stream="ads", data=data, emitted_at=1000)
         )
 
     writer.flush()
 
     [batch] = written_batches(client)
-    assert batch.schema == pa.schema(
-        [
-            ("ad_id", pa.int64()),
-            ("advertiser_id", pa.int64()),
-            ("spend", pa.float64()),
-            ("campaign_budget", pa.decimal128(38, 2)),
-        ]
-    )
+    assert batch.schema == pa.schema([("ad_id", pa.int64()), ("spend", pa.float64())])
     assert batch.to_pylist() == [
-        {
-            "ad_id": TIKTOK_AD_ID,
-            "advertiser_id": TIKTOK_AD_ID + 1,
-            "spend": 12.5,
-            "campaign_budget": Decimal(TIKTOK_AD_ID),
-        },
-        {
-            "ad_id": None,
-            "advertiser_id": 1,
-            "spend": 3.0,
-            "campaign_budget": Decimal("99.99"),
-        },
+        {"ad_id": TIKTOK_AD_ID, "spend": 12.5},
+        {"ad_id": None, "spend": 3.0},
     ]

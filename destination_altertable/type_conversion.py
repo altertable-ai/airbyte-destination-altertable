@@ -5,28 +5,23 @@ See: https://docs.airbyte.com/platform/understanding-airbyte/supported-data-type
 """
 
 import json
-import math
 from datetime import date, datetime, time
-from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
 
-# Integers beyond this magnitude are not all exactly representable as float64.
+# float64 can't represent every integer beyond this magnitude exactly.
 MAX_EXACT_FLOAT_INTEGER = 2**53
-INT64_MIN = -(2**63)
-INT64_MAX = 2**63 - 1
-DECIMAL128_MAX_PRECISION = 38
+INT64_RANGE = range(-(2**63), 2**63)
 
 
 def convert_column_to_arrow(
     values: list[Any], property_schema: dict
 ) -> tuple[pa.DataType, list[Any]]:
-    """Convert all the values of a column to a PyArrow type and values.
+    """Convert the values of a column to a PyArrow type and values.
 
-    Numeric columns are typed from their values so that no value loses precision:
-    `number` stays float64 unless it holds integers float64 can't represent exactly,
-    and integers that don't fit int64 are widened to decimal128 then string.
+    `number` columns are float64, except when all their values are integers and some
+    can't be represented exactly as float64 (e.g. IDs): those columns are int64.
 
     Args:
         values: The column values, one per record (None for missing values).
@@ -35,89 +30,38 @@ def convert_column_to_arrow(
     Returns:
         A tuple of (PyArrow type, converted values).
     """
-    json_type = _json_type(property_schema)
-    airbyte_type = property_schema.get("airbyte_type")
-
-    if json_type == "integer" or (json_type == "number" and airbyte_type == "integer"):
-        return _convert_numeric_column(values, integer=True)
-    if json_type == "number":
-        return _convert_numeric_column(values, integer=False)
+    if (
+        get_json_type(property_schema) == "number"
+        and property_schema.get("airbyte_type") != "integer"
+    ):
+        return convert_number_column(values)
 
     sample_value = next((v for v in values if v is not None), None)
     pa_type, _ = convert_to_arrow(sample_value, property_schema)
     return pa_type, [convert_to_arrow(v, property_schema)[1] for v in values]
 
 
-def _json_type(property_schema: dict) -> Any:
+def convert_number_column(values: list[Any]) -> tuple[pa.DataType, list[Any]]:
+    present = [v for v in values if v is not None]
+    if all(is_integral(v) and int(v) in INT64_RANGE for v in present) and any(
+        type(v) is int and abs(v) > MAX_EXACT_FLOAT_INTEGER for v in present
+    ):
+        return pa.int64(), [None if v is None else int(v) for v in values]
+
+    # PyArrow rejects integers that float64 can't represent exactly instead of rounding them.
+    return pa.float64(), [float(v) if type(v) is int else v for v in values]
+
+
+def is_integral(value: Any) -> bool:
+    return type(value) is int or (isinstance(value, float) and value.is_integer())
+
+
+def get_json_type(property_schema: dict) -> Any:
     json_type = property_schema.get("type")
     # Handle nullable types (e.g., ["null", "string"])
     if isinstance(json_type, list):
         json_type = next((t for t in json_type if t != "null"), "string")
     return json_type
-
-
-def _is_integer(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _convert_numeric_column(
-    values: list[Any], integer: bool
-) -> tuple[pa.DataType, list[Any]]:
-    present = [v for v in values if v is not None]
-
-    if not all(isinstance(v, (int, float)) for v in present):
-        return _convert_to_string_column(values)
-
-    has_fraction = any(isinstance(v, float) and not v.is_integer() for v in present)
-    has_inexact_float_integer = any(
-        _is_integer(v) and abs(v) > MAX_EXACT_FLOAT_INTEGER for v in present
-    )
-
-    if has_fraction:
-        if not has_inexact_float_integer:
-            return pa.float64(), values
-        return _convert_to_decimal_column(values)
-
-    if not integer and not has_inexact_float_integer:
-        return pa.float64(), values
-
-    integers = [None if v is None else int(v) for v in values]
-    if all(INT64_MIN <= v <= INT64_MAX for v in integers if v is not None):
-        return pa.int64(), integers
-    return _convert_to_decimal_column(integers)
-
-
-def _convert_to_decimal_column(values: list[Any]) -> tuple[pa.DataType, list[Any]]:
-    """Convert numbers to a decimal128 column, or a string column if they don't fit."""
-    if any(isinstance(v, float) and not math.isfinite(v) for v in values):
-        return _convert_to_string_column(values)
-
-    # repr() is the shortest string that round-trips, i.e. the number as the source wrote it.
-    decimals = [
-        None if v is None else Decimal(repr(v) if isinstance(v, float) else int(v))
-        for v in values
-    ]
-    present = [d.as_tuple() for d in decimals if d is not None]
-    scale = max((max(0, -t.exponent) for t in present), default=0)
-    integer_digits = max(
-        (max(0, len(t.digits) + t.exponent) for t in present), default=0
-    )
-    if integer_digits + scale > DECIMAL128_MAX_PRECISION:
-        return _convert_to_string_column(values)
-    return pa.decimal128(DECIMAL128_MAX_PRECISION, scale), decimals
-
-
-def _convert_to_string_column(values: list[Any]) -> tuple[pa.DataType, list[Any]]:
-    def to_string(value: Any) -> str | None:
-        if value is None or isinstance(value, str):
-            return value
-        if isinstance(value, float):
-            return repr(value)
-        if _is_integer(value):
-            return str(value)
-        return json.dumps(value)
-
-    return pa.string(), [to_string(v) for v in values]
 
 
 def convert_to_arrow(value: Any, property_schema: dict) -> tuple[pa.DataType, Any]:
@@ -130,13 +74,9 @@ def convert_to_arrow(value: Any, property_schema: dict) -> tuple[pa.DataType, An
     Returns:
         A tuple of (PyArrow type, converted value).
     """
-    json_type = property_schema.get("type")
+    json_type = get_json_type(property_schema)
     format_ = property_schema.get("format")
     airbyte_type = property_schema.get("airbyte_type")
-
-    # Handle nullable types (e.g., ["null", "string"])
-    if isinstance(json_type, list):
-        json_type = next((t for t in json_type if t != "null"), "string")
 
     # Date: {"type": "string", "format": "date"}
     if json_type == "string" and format_ == "date":
