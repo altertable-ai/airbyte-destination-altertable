@@ -1,10 +1,12 @@
 """Unit tests for type conversion utilities."""
 
 from datetime import date, datetime, time
+from decimal import Decimal
 
 import pyarrow as pa
 
 from destination_altertable.type_conversion import (
+    convert_column_to_arrow,
     convert_to_arrow,
     parse_date,
     parse_time,
@@ -408,3 +410,112 @@ class TestConvertRecordsToPyArrowTable:
         assert table.num_rows == 2
         assert table.column("id").to_pylist() == [1, 2]
         assert table.column("optional_timestamp").to_pylist() == [None, None]
+
+
+TIKTOK_AD_ID = 7628540698668761000
+
+
+def to_arrow(values: list, schema: dict) -> pa.Array:
+    pa_type, converted = convert_column_to_arrow(values, schema)
+    return pa.array(converted, type=pa_type)
+
+
+class TestConvertColumnToArrowNumber:
+    """Tests for convert_column_to_arrow with `number` columns."""
+
+    def test_floats_stay_float64(self):
+        array = to_arrow([1.5, None, 2], {"type": "number"})
+        assert array.type == pa.float64()
+        assert array.to_pylist() == [1.5, None, 2.0]
+
+    def test_small_integers_stay_float64(self):
+        array = to_arrow([1, 2**53, -(2**53)], {"type": ["null", "number"]})
+        assert array.type == pa.float64()
+        assert array.to_pylist() == [1.0, 2.0**53, -(2.0**53)]
+
+    def test_all_nulls_stay_float64(self):
+        array = to_arrow([None, None], {"type": ["null", "number"]})
+        assert array.type == pa.float64()
+
+    def test_no_values_stay_float64(self):
+        pa_type, converted = convert_column_to_arrow([], {"type": "number"})
+        assert pa_type == pa.float64()
+        assert converted == []
+
+    def test_integer_beyond_float64_precision_becomes_int64(self):
+        array = to_arrow([TIKTOK_AD_ID, None, 1], {"type": ["null", "number"]})
+        assert array.type == pa.int64()
+        assert array.to_pylist() == [TIKTOK_AD_ID, None, 1]
+
+    def test_integral_floats_with_large_integers_become_int64(self):
+        array = to_arrow([TIKTOK_AD_ID, 2.0], {"type": "number"})
+        assert array.type == pa.int64()
+        assert array.to_pylist() == [TIKTOK_AD_ID, 2]
+
+    def test_mixed_large_integers_and_floats_become_decimal(self):
+        array = to_arrow([TIKTOK_AD_ID, 1.25, None, 0.1], {"type": "number"})
+        assert array.type == pa.decimal128(38, 2)
+        assert array.to_pylist() == [
+            Decimal(TIKTOK_AD_ID),
+            Decimal("1.25"),
+            None,
+            Decimal("0.10"),
+        ]
+
+    def test_integers_beyond_int64_become_decimal(self):
+        array = to_arrow([2**64, -(2**63) - 1], {"type": "number"})
+        assert array.type == pa.decimal128(38, 0)
+        assert array.to_pylist() == [Decimal(2**64), Decimal(-(2**63) - 1)]
+
+    def test_integers_beyond_decimal128_become_string(self):
+        array = to_arrow([10**40, 1, None], {"type": "number"})
+        assert array.type == pa.string()
+        assert array.to_pylist() == [str(10**40), "1", None]
+
+    def test_mixed_floats_beyond_decimal128_precision_become_string(self):
+        array = to_arrow([TIKTOK_AD_ID, 1e-30], {"type": "number"})
+        assert array.type == pa.string()
+        assert array.to_pylist() == [str(TIKTOK_AD_ID), "1e-30"]
+
+    def test_mixed_non_finite_floats_become_string(self):
+        array = to_arrow([TIKTOK_AD_ID, float("nan")], {"type": "number"})
+        assert array.type == pa.string()
+        assert array.to_pylist() == [str(TIKTOK_AD_ID), "nan"]
+
+    def test_non_numeric_values_become_string(self):
+        array = to_arrow([1.5, "n/a"], {"type": "number"})
+        assert array.type == pa.string()
+        assert array.to_pylist() == ["1.5", "n/a"]
+
+    def test_airbyte_integer_beyond_int64_becomes_decimal(self):
+        array = to_arrow([2**63], {"type": "number", "airbyte_type": "integer"})
+        assert array.type == pa.decimal128(38, 0)
+        assert array.to_pylist() == [Decimal(2**63)]
+
+
+class TestConvertColumnToArrowInteger:
+    """Tests for convert_column_to_arrow with `integer` columns."""
+
+    def test_int64(self):
+        array = to_arrow([TIKTOK_AD_ID, None, -1], {"type": ["null", "integer"]})
+        assert array.type == pa.int64()
+        assert array.to_pylist() == [TIKTOK_AD_ID, None, -1]
+
+    def test_int64_bounds(self):
+        array = to_arrow([2**63 - 1, -(2**63)], {"type": "integer"})
+        assert array.type == pa.int64()
+
+    def test_beyond_int64_becomes_decimal(self):
+        array = to_arrow([2**63, 1], {"type": "integer"})
+        assert array.type == pa.decimal128(38, 0)
+        assert array.to_pylist() == [Decimal(2**63), Decimal(1)]
+
+    def test_integral_floats_become_int64(self):
+        array = to_arrow([1.0, 2], {"type": "integer"})
+        assert array.type == pa.int64()
+        assert array.to_pylist() == [1, 2]
+
+    def test_fractional_floats_stay_float64(self):
+        array = to_arrow([1.5, 2], {"type": "integer"})
+        assert array.type == pa.float64()
+        assert array.to_pylist() == [1.5, 2.0]
