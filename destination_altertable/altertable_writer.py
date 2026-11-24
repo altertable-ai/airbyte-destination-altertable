@@ -21,10 +21,6 @@ from .type_conversion import (
 )
 
 
-# Maximum GRPC message size is 512MB. We use 400MB as a safety margin because
-# we only have a message size average.
-MAX_BATCH_SIZE = 400 * 1024 * 1024
-
 SESSION_EXPIRED_MESSAGE = "Session expired"
 
 StreamKey = tuple[Optional[str], str]
@@ -43,9 +39,11 @@ def quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-# Records are converted to Arrow in chunks of this many rows, so that at most
-# one chunk per stream is held as Python objects.
+# Records are converted to Arrow in chunks of at most this many rows or string
+# bytes, so that at most one chunk per stream is held as Python objects. Chunks
+# are written as is, so they must stay below the 512MB gRPC message limit.
 ROWS_PER_CHUNK = 1000
+BYTES_PER_CHUNK = 16 * 1024 * 1024
 
 # Buffered records take ~2x their Arrow size in memory at flush time, so
 # flushing every 1/5th of the memory limit keeps the peak below half of it.
@@ -116,6 +114,7 @@ class StreamBuffer:
         }
         self._columns: dict[str, list] = {name: [] for name in self.properties}
         self._pending_rows = 0
+        self._pending_bytes = 0
 
     def append(self, data: dict[str, Any]) -> int:
         """Buffer a record, returning the number of Arrow bytes it added."""
@@ -124,8 +123,14 @@ class StreamBuffer:
             if name not in self._number_columns:
                 value = convert_to_arrow(value, prop)[1]
             self._columns[name].append(value)
+            # Strings make records large, every other type is fixed width.
+            if isinstance(value, str):
+                self._pending_bytes += len(value)
         self._pending_rows += 1
-        if self._pending_rows >= ROWS_PER_CHUNK:
+        if (
+            self._pending_rows >= ROWS_PER_CHUNK
+            or self._pending_bytes >= BYTES_PER_CHUNK
+        ):
             return self.convert_pending()
         return 0
 
@@ -143,6 +148,7 @@ class StreamBuffer:
         self.batches.append(batch)
         self._columns = {name: [] for name in self.properties}
         self._pending_rows = 0
+        self._pending_bytes = 0
         return batch.nbytes
 
     def take_batches(self) -> list[pa.RecordBatch]:
@@ -296,18 +302,6 @@ class AltertableWriter:
         )
         self._created_schemas.add(schema_name)
 
-    def _estimate_rows_per_batch(self, table: pa.Table) -> int:
-        if rows_per_batch := self.config.get("rows_per_batch"):
-            return rows_per_batch
-
-        # Split table into batches to avoid gRPC message size limits (512MB default)
-        # Use memory size to determine batch boundaries (400MB per batch to stay safely under 512MB limit)
-        total_size = table.get_total_buffer_size()
-        if total_size > MAX_BATCH_SIZE:
-            return max(1, int(len(table) * MAX_BATCH_SIZE / total_size))
-        else:
-            return len(table)
-
     def _get_incremental_options(
         self, stream_config: AirbyteStream
     ) -> Optional[IngestIncrementalOptions]:
@@ -375,13 +369,11 @@ class AltertableWriter:
                 continue
 
             stream_config = self.streams[stream_key]
-            table = pa.Table.from_batches(batches)
-            estimated_rows_per_batch = self._estimate_rows_per_batch(table)
             self._ingest(
                 stream_key,
                 stream_config,
-                table.schema,
-                table.to_batches(max_chunksize=estimated_rows_per_batch),
+                batches[0].schema,
+                batches,
                 self._get_incremental_options(stream_config),
             )
 

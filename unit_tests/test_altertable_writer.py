@@ -157,6 +157,19 @@ def test_records_are_converted_to_arrow_in_chunks(cgroup, monkeypatch) -> None:
     ]
 
 
+def test_records_are_converted_to_arrow_once_strings_are_large(
+    cgroup, monkeypatch
+) -> None:
+    monkeypatch.setattr(altertable_writer, "BYTES_PER_CHUNK", 20)
+    writer = make_writer(CONFIG)
+    writer.set_streams(CATALOG)
+    for i in range(5):
+        writer.buffer_record(make_record(i))
+
+    # "Person i" is 8 bytes, so a chunk is cut every 3 records
+    assert [b.num_rows for b in writer.buffer[(None, "test_table")].batches] == [3]
+
+
 def test_flush_resets_buffered_bytes(cgroup) -> None:
     writer = make_writer(CONFIG)
     writer.set_streams(CATALOG)
