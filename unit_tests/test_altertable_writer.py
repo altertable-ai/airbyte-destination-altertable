@@ -124,13 +124,14 @@ def test_should_flush_once_threshold_is_reached(cgroup, monkeypatch) -> None:
     monkeypatch.setattr(altertable_writer, "ROWS_PER_CHUNK", 2)
     writer = make_writer(CONFIG)
     writer.set_streams(CATALOG)
-    writer.flush_threshold = 1
+    writer.flush_threshold = 20
 
-    # Pending records are only counted once converted to Arrow
+    # Pending records are counted by the size of their strings ("Person 1" is 8 bytes)
     writer.buffer_record(make_record(1))
-    assert writer.buffered_bytes == 0
+    assert writer.buffered_bytes == 8
     assert not writer.should_flush()
 
+    # Then by their Arrow size once converted
     writer.buffer_record(make_record(2))
     assert (
         writer.buffered_bytes == writer.buffer[(None, "test_table")].batches[0].nbytes

@@ -112,12 +112,19 @@ class StreamBuffer:
         self._number_columns = {
             name for name, prop in self.properties.items() if is_number_column(prop)
         }
+        self._batches_bytes = 0
         self._columns: dict[str, list] = {name: [] for name in self.properties}
         self._pending_rows = 0
         self._pending_bytes = 0
 
+    @property
+    def nbytes(self) -> int:
+        """Arrow size of the converted records plus string size of the pending ones."""
+        return self._batches_bytes + self._pending_bytes
+
     def append(self, data: dict[str, Any]) -> int:
-        """Buffer a record, returning the number of Arrow bytes it added."""
+        """Buffer a record, returning the number of bytes it added to the buffer."""
+        nbytes = self.nbytes
         for name, prop in self.properties.items():
             value = data.get(name)
             if name not in self._number_columns:
@@ -131,13 +138,13 @@ class StreamBuffer:
             self._pending_rows >= ROWS_PER_CHUNK
             or self._pending_bytes >= BYTES_PER_CHUNK
         ):
-            return self.convert_pending()
-        return 0
+            self.convert_pending()
+        return self.nbytes - nbytes
 
-    def convert_pending(self) -> int:
-        """Convert pending records to an Arrow batch, returning its size in bytes."""
+    def convert_pending(self):
+        """Convert pending records to an Arrow batch."""
         if not self._pending_rows:
-            return 0
+            return
         arrays = []
         for field_ in self.schema:
             pa_type, values = field_.type, self._columns[field_.name]
@@ -146,16 +153,17 @@ class StreamBuffer:
             arrays.append(pa.array(values, type=pa_type))
         batch = pa.RecordBatch.from_arrays(arrays, names=self.schema.names)
         self.batches.append(batch)
+        self._batches_bytes += batch.nbytes
         self._columns = {name: [] for name in self.properties}
         self._pending_rows = 0
         self._pending_bytes = 0
-        return batch.nbytes
 
     def take_batches(self) -> list[pa.RecordBatch]:
         """Return the buffered records as batches with the same schema, emptying the buffer."""
         self.convert_pending()
         batches = unify_number_columns(self.batches)
         self.batches = []
+        self._batches_bytes = 0
         return batches
 
 
@@ -169,6 +177,7 @@ class AltertableWriter:
         self.streams: Dict[StreamKey, AirbyteStream] = {}
         self._replaced_streams: set[StreamKey] = set()
         self._created_schemas: set[str] = set()
+        self._written_schemas: Dict[StreamKey, pa.Schema] = {}
 
     def __enter__(self):
         """Enter context manager"""
@@ -362,11 +371,30 @@ class AltertableWriter:
         if mode == IngestTableMode.REPLACE:
             self._replaced_streams.add(stream_key)
 
+    def _cast_to_written_schema(
+        self, stream_key: StreamKey, batches: list[pa.RecordBatch]
+    ) -> list[pa.RecordBatch]:
+        """Give number columns the type of their first flush.
+
+        The server silently casts batches to the table's column types, so lossy casts
+        (e.g. rounding large integers to float64) are rejected here instead.
+        """
+        schema = self._written_schemas.setdefault(stream_key, batches[0].schema)
+        if batches[0].schema == schema:
+            return batches
+        try:
+            return [batch.cast(schema) for batch in batches]
+        except pa.ArrowInvalid as e:
+            raise ValueError(
+                f"Stream {stream_key[1]} can't be written exactly with the column types of its previous records: {e}"
+            ) from e
+
     def flush(self):
         for stream_key, buffer in self.buffer.items():
             batches = buffer.take_batches()
             if not batches:
                 continue
+            batches = self._cast_to_written_schema(stream_key, batches)
 
             stream_config = self.streams[stream_key]
             self._ingest(

@@ -92,6 +92,7 @@ class DestinationAltertable(Destination):
                 ):
                     descriptor = message.trace.stream_status.stream_descriptor
                     writer.complete_stream(descriptor.namespace, descriptor.name)
+            writer.flush()
 
     @override
     def run(self, args: list[str]) -> None:

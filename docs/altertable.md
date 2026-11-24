@@ -60,7 +60,7 @@ Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
 
 Objects and arrays are stored as JSON-encoded strings.
 
-A `number` column is created as `BIGINT` instead of `DOUBLE` when the first records written to it are all integers and some are beyond ±2^53, which `DOUBLE` can't represent exactly (e.g. IDs). Existing columns keep their type: refresh the stream to recreate them.
+A `number` column is created as `BIGINT` instead of `DOUBLE` when the first records written to it are all integers and some are beyond ±2^53, which `DOUBLE` can't represent exactly (e.g. IDs). Existing columns keep their type: refresh the stream to recreate them. The sync fails when later records can't be written exactly with the column type, rather than rounding them.
 
 ## Namespace support
 
