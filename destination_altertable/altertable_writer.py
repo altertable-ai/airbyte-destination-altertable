@@ -20,6 +20,11 @@ from .type_conversion import convert_column_to_arrow
 # we only have a message size average.
 MAX_BATCH_SIZE = 400 * 1024 * 1024
 
+# Records kept in memory for a stream before they are written, when the source
+# sends no state message in between. Without this limit, a source that checkpoints
+# rarely makes the whole stream sit in memory.
+MAX_BUFFERED_RECORDS = 10_000
+
 SESSION_EXPIRED_MESSAGE = "Session expired"
 
 StreamKey = tuple[Optional[str], str]
@@ -128,7 +133,10 @@ class AltertableWriter:
         stream.read_all()
 
     def buffer_record(self, record: AirbyteRecordMessage):
-        self.buffer[(record.namespace, record.stream)].append(record)
+        records = self.buffer[(record.namespace, record.stream)]
+        records.append(record)
+        if len(records) >= MAX_BUFFERED_RECORDS:
+            self.flush()
 
     def complete_stream(self, namespace: Optional[str], name: str):
         self.flush()
