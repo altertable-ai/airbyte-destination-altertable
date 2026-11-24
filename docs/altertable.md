@@ -24,6 +24,8 @@ This page guides you through the process of setting up the [Altertable](https://
   - Port of the Altertable Flight SQL server. Defaults to `443`.
 - **Use TLS** _(optional)_
   - Whether to use TLS for the connection. Defaults to `true`. Recommended for production.
+- **Flush Threshold (MB)** _(optional)_
+  - Size of buffered records (in Arrow format) above which they are written to Altertable, without waiting for the next checkpoint. Peak memory is roughly 2x this value. Defaults to 1/5th of the container memory limit, or 100MB if there is no limit.
 
 ## Supported sync modes
 
@@ -58,7 +60,7 @@ Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
 
 Objects and arrays are stored as JSON-encoded strings.
 
-A `number` column is created as `BIGINT` instead of `DOUBLE` when the first records written to it are all integers and some are beyond ±2^53, which `DOUBLE` can't represent exactly (e.g. IDs). Existing columns keep their type: refresh the stream to recreate them.
+A `number` column is created as `BIGINT` instead of `DOUBLE` when the first records written to it are all integers and some are beyond ±2^53, which `DOUBLE` can't represent exactly (e.g. IDs). Existing columns keep their type: refresh the stream to recreate them. The sync fails when later records can't be written exactly with the column type, rather than rounding them.
 
 ## Namespace support
 
@@ -81,6 +83,7 @@ Records are not tagged with an `_airbyte_generation_id` column.
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
+| 0.1.6   | 2026-11-24 | [17](https://github.com/altertable-ai/airbyte-destination-altertable/pull/17) | Flush buffered records before the next checkpoint once they reach a size limit |
 | 0.1.5   | 2026-11-24 | [22](https://github.com/altertable-ai/airbyte-destination-altertable/pull/22) | Keep large integers exact in `number` columns |
 | 0.1.4   | 2026-11-24 | [21](https://github.com/altertable-ai/airbyte-destination-altertable/pull/21) | Reopen the Flight session when it expires during a sync |
 | 0.1.3   | 2026-11-23 | [20](https://github.com/altertable-ai/airbyte-destination-altertable/pull/20) | Support refreshes and clears |

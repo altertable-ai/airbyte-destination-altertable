@@ -60,6 +60,14 @@
         "description": "Whether to use TLS for the connection to Altertable. Recommended for production.",
         "default": true,
         "order": 6
+      },
+      "flush_threshold_mb": {
+        "title": "Flush Threshold (MB)",
+        "type": "integer",
+        "description": "Size of buffered records (in Arrow format) above which they are written to Altertable, without waiting for the next checkpoint. Peak memory is roughly 2x this value. Defaults to 1/5th of the container memory limit, or 100MB if there is no limit.",
+        "minimum": 1,
+        "examples": [100],
+        "order": 7
       }
     }
   }

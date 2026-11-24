@@ -1,6 +1,6 @@
-from collections import defaultdict
 from dataclasses import dataclass, field
 from logging import getLogger
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 import altertable_flightsql
@@ -13,12 +13,13 @@ from airbyte_cdk.models import (
     DestinationSyncMode,
 )
 
-from .type_conversion import convert_column_to_arrow
+from .type_conversion import (
+    convert_number_column,
+    convert_to_arrow,
+    is_number_column,
+    unify_number_columns,
+)
 
-
-# Maximum GRPC message size is 512MB. We use 400MB as a safety margin because
-# we only have a message size average.
-MAX_BATCH_SIZE = 400 * 1024 * 1024
 
 SESSION_EXPIRED_MESSAGE = "Session expired"
 
@@ -38,6 +39,46 @@ def quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+# Records are converted to Arrow in chunks of at most this many rows or string
+# bytes, so that at most one chunk per stream is held as Python objects. Chunks
+# are written as is, so they must stay below the 512MB gRPC message limit.
+ROWS_PER_CHUNK = 1000
+BYTES_PER_CHUNK = 16 * 1024 * 1024
+
+# Buffered records take ~2x their Arrow size in memory at flush time, so
+# flushing every 1/5th of the memory limit keeps the peak below half of it.
+MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO = 5
+DEFAULT_FLUSH_THRESHOLD = 100 * 1024 * 1024
+
+CGROUP_V2_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory.max")
+CGROUP_V1_MEMORY_LIMIT = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+# cgroup v1 reports "no limit" as a page-aligned value close to 2**63.
+CGROUP_V1_UNLIMITED = 2**62
+
+
+def get_memory_limit() -> Optional[int]:
+    """Return the container memory limit in bytes, or None if unlimited or unknown."""
+    for path in (CGROUP_V2_MEMORY_LIMIT, CGROUP_V1_MEMORY_LIMIT):
+        try:
+            value = path.read_text().strip()
+        except OSError:
+            continue
+        if value == "max":
+            return None
+        limit = int(value)
+        return limit if limit < CGROUP_V1_UNLIMITED else None
+    return None
+
+
+def get_flush_threshold(config: Dict[str, Any]) -> int:
+    """Return the buffered size in bytes above which records are flushed."""
+    if flush_threshold_mb := config.get("flush_threshold_mb"):
+        return flush_threshold_mb * 1024 * 1024
+    if memory_limit := get_memory_limit():
+        return memory_limit // MEMORY_LIMIT_TO_FLUSH_THRESHOLD_RATIO
+    return DEFAULT_FLUSH_THRESHOLD
+
+
 @dataclass(frozen=True)
 class AirbyteStream:
     name: str
@@ -48,15 +89,95 @@ class AirbyteStream:
     primary_key: list[str] = field(default_factory=list)
     cursor_field: list[str] = field(default_factory=list)
 
+    @property
+    def arrow_schema(self) -> pa.Schema:
+        """Arrow schema of the stream when it has no values.
+
+        Arrow types only depend on the JSON schema, except for number columns.
+        """
+        return pa.schema(
+            (name, convert_to_arrow(None, prop)[0])
+            for name, prop in self.properties.items()
+        )
+
+
+class StreamBuffer:
+    """Records of a stream, converted to Arrow as they are buffered."""
+
+    def __init__(self, stream: AirbyteStream):
+        self.properties = stream.properties
+        self.schema = stream.arrow_schema
+        self.batches: list[pa.RecordBatch] = []
+        # Number columns are typed on all their values, so they are converted per chunk.
+        self._number_columns = {
+            name for name, prop in self.properties.items() if is_number_column(prop)
+        }
+        self._batches_bytes = 0
+        self._columns: dict[str, list] = {name: [] for name in self.properties}
+        self._pending_rows = 0
+        self._pending_bytes = 0
+
+    @property
+    def nbytes(self) -> int:
+        """Arrow size of the converted records plus string size of the pending ones."""
+        return self._batches_bytes + self._pending_bytes
+
+    def append(self, data: dict[str, Any]) -> int:
+        """Buffer a record, returning the number of bytes it added to the buffer."""
+        nbytes = self.nbytes
+        for name, prop in self.properties.items():
+            value = data.get(name)
+            if name not in self._number_columns:
+                value = convert_to_arrow(value, prop)[1]
+            self._columns[name].append(value)
+            # Strings make records large, every other type is fixed width.
+            if isinstance(value, str):
+                self._pending_bytes += len(value)
+        self._pending_rows += 1
+        if (
+            self._pending_rows >= ROWS_PER_CHUNK
+            or self._pending_bytes >= BYTES_PER_CHUNK
+        ):
+            self.convert_pending()
+        return self.nbytes - nbytes
+
+    def convert_pending(self):
+        """Convert pending records to an Arrow batch."""
+        if not self._pending_rows:
+            return
+        arrays = []
+        for field_ in self.schema:
+            pa_type, values = field_.type, self._columns[field_.name]
+            if field_.name in self._number_columns:
+                pa_type, values = convert_number_column(values)
+            arrays.append(pa.array(values, type=pa_type))
+        batch = pa.RecordBatch.from_arrays(arrays, names=self.schema.names)
+        self.batches.append(batch)
+        self._batches_bytes += batch.nbytes
+        self._columns = {name: [] for name in self.properties}
+        self._pending_rows = 0
+        self._pending_bytes = 0
+
+    def take_batches(self) -> list[pa.RecordBatch]:
+        """Return the buffered records as batches with the same schema, emptying the buffer."""
+        self.convert_pending()
+        batches = unify_number_columns(self.batches)
+        self.batches = []
+        self._batches_bytes = 0
+        return batches
+
 
 class AltertableWriter:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.client = self._connect()
-        self.buffer = defaultdict(list)
+        self.buffer: Dict[StreamKey, StreamBuffer] = {}
+        self.buffered_bytes = 0
+        self.flush_threshold = get_flush_threshold(config)
         self.streams: Dict[StreamKey, AirbyteStream] = {}
         self._replaced_streams: set[StreamKey] = set()
         self._created_schemas: set[str] = set()
+        self._written_schemas: Dict[StreamKey, pa.Schema] = {}
 
     def __enter__(self):
         """Enter context manager"""
@@ -128,7 +249,13 @@ class AltertableWriter:
         stream.read_all()
 
     def buffer_record(self, record: AirbyteRecordMessage):
-        self.buffer[(record.namespace, record.stream)].append(record)
+        stream_key = (record.namespace, record.stream)
+        if (buffer := self.buffer.get(stream_key)) is None:
+            buffer = self.buffer[stream_key] = StreamBuffer(self.streams[stream_key])
+        self.buffered_bytes += buffer.append(record.data)
+
+    def should_flush(self) -> bool:
+        return self.buffered_bytes >= self.flush_threshold
 
     def complete_stream(self, namespace: Optional[str], name: str):
         self.flush()
@@ -144,7 +271,7 @@ class AltertableWriter:
 
         # The stream received no records (e.g. a clear): replace the table with
         # an empty one. The server ignores ingests without any batch.
-        schema = self._convert_records_to_pyarrow_table(stream_config, []).schema
+        schema = stream_config.arrow_schema
         self._ingest(
             stream_key,
             stream_config,
@@ -183,37 +310,6 @@ class AltertableWriter:
             lambda: self.client.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_name}")
         )
         self._created_schemas.add(schema_name)
-
-    def _convert_records_to_pyarrow_table(
-        self, stream_config: AirbyteStream, records: list[AirbyteRecordMessage]
-    ) -> pa.Table:
-        properties = stream_config.properties
-
-        fields = []
-        converted_rows = [{} for _ in records]
-
-        for field_name, prop in properties.items():
-            pa_type, converted = convert_column_to_arrow(
-                [r.data.get(field_name) for r in records], prop
-            )
-            fields.append((field_name, pa_type))
-            for row, value in zip(converted_rows, converted):
-                row[field_name] = value
-
-        schema = pa.schema(fields)
-        return pa.Table.from_pylist(converted_rows, schema=schema)
-
-    def _estimate_rows_per_batch(self, table: pa.Table) -> int:
-        if rows_per_batch := self.config.get("rows_per_batch"):
-            return rows_per_batch
-
-        # Split table into batches to avoid gRPC message size limits (512MB default)
-        # Use memory size to determine batch boundaries (400MB per batch to stay safely under 512MB limit)
-        total_size = table.get_total_buffer_size()
-        if total_size > MAX_BATCH_SIZE:
-            return max(1, int(len(table) * MAX_BATCH_SIZE / total_size))
-        else:
-            return len(table)
 
     def _get_incremental_options(
         self, stream_config: AirbyteStream
@@ -275,20 +371,39 @@ class AltertableWriter:
         if mode == IngestTableMode.REPLACE:
             self._replaced_streams.add(stream_key)
 
+    def _cast_to_written_schema(
+        self, stream_key: StreamKey, batches: list[pa.RecordBatch]
+    ) -> list[pa.RecordBatch]:
+        """Give number columns the type of their first flush.
+
+        The server silently casts batches to the table's column types, so lossy casts
+        (e.g. rounding large integers to float64) are rejected here instead.
+        """
+        schema = self._written_schemas.setdefault(stream_key, batches[0].schema)
+        if batches[0].schema == schema:
+            return batches
+        try:
+            return [batch.cast(schema) for batch in batches]
+        except pa.ArrowInvalid as e:
+            raise ValueError(
+                f"Stream {stream_key[1]} can't be written exactly with the column types of its previous records: {e}"
+            ) from e
+
     def flush(self):
-        for stream_key, records in self.buffer.items():
-            if not records:
+        for stream_key, buffer in self.buffer.items():
+            batches = buffer.take_batches()
+            if not batches:
                 continue
+            batches = self._cast_to_written_schema(stream_key, batches)
 
             stream_config = self.streams[stream_key]
-            table = self._convert_records_to_pyarrow_table(stream_config, records)
-            estimated_rows_per_batch = self._estimate_rows_per_batch(table)
             self._ingest(
                 stream_key,
                 stream_config,
-                table.schema,
-                table.to_batches(max_chunksize=estimated_rows_per_batch),
+                batches[0].schema,
+                batches,
                 self._get_incremental_options(stream_config),
             )
 
         self.buffer.clear()
+        self.buffered_bytes = 0

@@ -96,6 +96,7 @@ def test_check_fails_on_test_connection_error(mock_writer_class) -> None:
 @patch("destination_altertable.destination.AltertableWriter")
 def test_write_yields_state_messages(mock_writer_class) -> None:
     mock_writer = MagicMock()
+    mock_writer.should_flush.return_value = False
     mock_writer_class.return_value.__enter__.return_value = mock_writer
 
     state_message = AirbyteMessage(
@@ -122,12 +123,14 @@ def test_write_yields_state_messages(mock_writer_class) -> None:
     assert result[0].type == Type.STATE
     mock_writer.set_streams.assert_called_once_with(CATALOG)
     mock_writer.buffer_record.assert_called_once_with(record_message.record)
-    mock_writer.flush.assert_called_once()
+    # On the state, then at the end of the input
+    assert mock_writer.flush.call_count == 2
 
 
 @patch("destination_altertable.destination.AltertableWriter")
 def test_write_flushes_on_each_state(mock_writer_class) -> None:
     mock_writer = MagicMock()
+    mock_writer.should_flush.return_value = False
     mock_writer_class.return_value.__enter__.return_value = mock_writer
 
     def make_state():
@@ -156,7 +159,8 @@ def test_write_flushes_on_each_state(mock_writer_class) -> None:
     result = list(destination.write(CONFIG, CATALOG, messages))
 
     assert len(result) == 2
-    assert mock_writer.flush.call_count == 2
+    # On each state, then at the end of the input
+    assert mock_writer.flush.call_count == 3
     assert mock_writer.buffer_record.call_count == 2
 
 
@@ -201,4 +205,65 @@ def test_write_empty_messages(mock_writer_class) -> None:
     result = list(destination.write(CONFIG, CATALOG, []))
 
     assert result == []
-    mock_writer.flush.assert_not_called()
+
+
+@patch("destination_altertable.destination.AltertableWriter")
+def test_write_flushes_at_the_end_of_the_input(mock_writer_class) -> None:
+    mock_writer = MagicMock()
+    mock_writer.should_flush.return_value = False
+    mock_writer_class.return_value.__enter__.return_value = mock_writer
+
+    messages = [
+        AirbyteMessage(
+            type=Type.RECORD,
+            record=AirbyteRecordMessage(
+                stream="test_table", data={"id": 1, "name": "Alice"}, emitted_at=1000
+            ),
+        )
+    ]
+
+    destination = DestinationAltertable()
+    list(destination.write(CONFIG, CATALOG, messages))
+
+    calls = [
+        name
+        for name, _, _ in mock_writer.mock_calls
+        if name in ("buffer_record", "flush")
+    ]
+    assert calls == ["buffer_record", "flush"]
+
+
+@patch("destination_altertable.destination.AltertableWriter")
+def test_write_flushes_early_when_buffer_is_full(mock_writer_class) -> None:
+    mock_writer = MagicMock()
+    mock_writer.should_flush.side_effect = [False, True, False]
+    mock_writer_class.return_value.__enter__.return_value = mock_writer
+
+    def make_record(i: int):
+        return AirbyteMessage(
+            type=Type.RECORD,
+            record=AirbyteRecordMessage(
+                stream="test_table",
+                data={"id": i, "name": f"Person {i}"},
+                emitted_at=1000,
+            ),
+        )
+
+    messages = [make_record(1), make_record(2), make_record(3)]
+
+    destination = DestinationAltertable()
+    result = list(destination.write(CONFIG, CATALOG, messages))
+
+    assert result == []
+    # Once after the second record, once at the end of the input
+    assert [
+        name
+        for name, _, _ in mock_writer.mock_calls
+        if name in ("buffer_record", "flush")
+    ] == [
+        "buffer_record",
+        "buffer_record",
+        "flush",
+        "buffer_record",
+        "flush",
+    ]

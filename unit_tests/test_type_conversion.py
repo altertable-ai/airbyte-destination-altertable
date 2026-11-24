@@ -5,8 +5,9 @@ from datetime import date, datetime, time
 import pyarrow as pa
 
 from destination_altertable.type_conversion import (
-    convert_column_to_arrow,
+    convert_number_column,
     convert_to_arrow,
+    is_number_column,
     parse_date,
     parse_time,
     parse_timestamp,
@@ -414,43 +415,34 @@ class TestConvertRecordsToPyArrowTable:
 TIKTOK_AD_ID = 7628540698668761000
 
 
-class TestConvertColumnToArrowNumber:
-    """Tests for convert_column_to_arrow with `number` columns."""
+class TestConvertNumberColumn:
+    """Tests for convert_number_column."""
 
     def test_floats(self):
-        pa_type, values = convert_column_to_arrow([1.5, None, 2], {"type": "number"})
+        pa_type, values = convert_number_column([1.5, None, 2])
         assert pa_type == pa.float64()
         assert values == [1.5, None, 2.0]
 
     def test_integers_exactly_representable_as_float64(self):
-        pa_type, values = convert_column_to_arrow(
-            [1, 2**53], {"type": ["null", "number"]}
-        )
+        pa_type, values = convert_number_column([1, 2**53])
         assert pa_type == pa.float64()
         assert values == [1.0, 2.0**53]
 
     def test_integers_beyond_float64_precision(self):
-        pa_type, values = convert_column_to_arrow(
-            [TIKTOK_AD_ID, None, 2.0], {"type": ["null", "number"]}
-        )
+        pa_type, values = convert_number_column([TIKTOK_AD_ID, None, 2.0])
         assert pa_type == pa.int64()
         assert values == [TIKTOK_AD_ID, None, 2]
 
     def test_integers_beyond_float64_precision_with_fractions(self):
-        pa_type, values = convert_column_to_arrow(
-            [TIKTOK_AD_ID, 1.5], {"type": "number"}
-        )
+        pa_type, values = convert_number_column([TIKTOK_AD_ID, 1.5])
         assert pa_type == pa.float64()
         assert values == [float(TIKTOK_AD_ID), 1.5]
 
     def test_integers_beyond_int64(self):
-        pa_type, values = convert_column_to_arrow([2**64], {"type": "number"})
+        pa_type, values = convert_number_column([2**64])
         assert pa_type == pa.float64()
         assert values == [float(2**64)]
 
-    def test_airbyte_integer(self):
-        pa_type, values = convert_column_to_arrow(
-            [TIKTOK_AD_ID], {"type": "number", "airbyte_type": "integer"}
-        )
-        assert pa_type == pa.int64()
-        assert values == [TIKTOK_AD_ID]
+    def test_airbyte_integer_is_not_a_number_column(self):
+        assert is_number_column({"type": ["null", "number"]})
+        assert not is_number_column({"type": "number", "airbyte_type": "integer"})

@@ -70,9 +70,17 @@ class DestinationAltertable(Destination):
     ) -> Iterable[Union[AirbyteMessage, AirbyteStateMessage]]:
         with AltertableWriter(config) as writer:
             writer.set_streams(configured_catalog)
+            logger.info(f"Flushing records every {writer.flush_threshold} bytes")
             for message in input_messages:
                 if message.type == Type.RECORD:
                     writer.buffer_record(message.record)
+                    # Flushing before a state message is safe: the state is
+                    # only emitted once every record preceding it is written.
+                    if writer.should_flush():
+                        logger.info(
+                            f"Flushing {writer.buffered_bytes} buffered bytes before state"
+                        )
+                        writer.flush()
                 elif message.type == Type.STATE:
                     writer.flush()
                     yield message
@@ -84,6 +92,7 @@ class DestinationAltertable(Destination):
                 ):
                     descriptor = message.trace.stream_status.stream_descriptor
                     writer.complete_stream(descriptor.namespace, descriptor.name)
+            writer.flush()
 
     @override
     def run(self, args: list[str]) -> None:
