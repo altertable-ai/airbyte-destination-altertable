@@ -68,6 +68,10 @@ def make_writer(config: dict) -> AltertableWriter:
         return AltertableWriter(config)
 
 
+# "Person i", the raw id and the meta without changes
+RECORD_BYTES = len("Person 1") + 36 + len('{"sync_id": null, "changes": []}')
+
+
 def make_record(i: int) -> AirbyteRecordMessage:
     return AirbyteRecordMessage(
         stream="test_table", data={"id": i, "name": f"Person {i}"}, emitted_at=1000
@@ -124,11 +128,11 @@ def test_should_flush_once_threshold_is_reached(cgroup, monkeypatch) -> None:
     monkeypatch.setattr(altertable_writer, "ROWS_PER_CHUNK", 2)
     writer = make_writer(CONFIG)
     writer.set_streams(CATALOG)
-    writer.flush_threshold = 20
+    writer.flush_threshold = RECORD_BYTES + 1
 
-    # Pending records are counted by the size of their strings ("Person 1" is 8 bytes)
+    # Pending records are counted by the size of their strings
     writer.buffer_record(make_record(1))
-    assert writer.buffered_bytes == 8
+    assert writer.buffered_bytes == RECORD_BYTES
     assert not writer.should_flush()
 
     # Then by their Arrow size once converted
@@ -153,7 +157,7 @@ def test_records_are_converted_to_arrow_in_chunks(cgroup, monkeypatch) -> None:
     ingest_writer = writer.client.ingest.return_value.__enter__.return_value
     batches = [call.args[0] for call in ingest_writer.write_batch.call_args_list]
     assert [b.num_rows for b in batches] == [2, 2, 1]
-    assert [row for b in batches for row in b.to_pylist()] == [
+    assert [row for b in batches for row in b.select(["id", "name"]).to_pylist()] == [
         {"id": i, "name": f"Person {i}"} for i in range(5)
     ]
 
@@ -161,13 +165,13 @@ def test_records_are_converted_to_arrow_in_chunks(cgroup, monkeypatch) -> None:
 def test_records_are_converted_to_arrow_once_strings_are_large(
     cgroup, monkeypatch
 ) -> None:
-    monkeypatch.setattr(altertable_writer, "BYTES_PER_CHUNK", 20)
+    monkeypatch.setattr(altertable_writer, "BYTES_PER_CHUNK", 3 * RECORD_BYTES)
     writer = make_writer(CONFIG)
     writer.set_streams(CATALOG)
     for i in range(5):
         writer.buffer_record(make_record(i))
 
-    # "Person i" is 8 bytes, so a chunk is cut every 3 records
+    # A chunk is cut every 3 records
     assert [b.num_rows for b in writer.buffer[(None, "test_table")].batches] == [3]
 
 

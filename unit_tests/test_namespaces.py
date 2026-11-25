@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Generator
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from airbyte_cdk.models import (
@@ -76,6 +76,14 @@ def ingested_ids(client: MagicMock) -> list[list[int]]:
     ]
 
 
+def created_schemas(client: MagicMock) -> list[str]:
+    return [
+        c.args[0]
+        for c in client.execute.call_args_list
+        if c.args[0].startswith("CREATE SCHEMA")
+    ]
+
+
 def test_stream_without_namespace_uses_configured_schema(client: MagicMock) -> None:
     writer = AltertableWriter(CONFIG)
     writer.set_streams(ConfiguredAirbyteCatalog(streams=[make_stream("forms")]))
@@ -84,7 +92,7 @@ def test_stream_without_namespace_uses_configured_schema(client: MagicMock) -> N
     writer.flush()
 
     assert ingested_tables(client) == [("my_catalog", "main", "forms")]
-    client.execute.assert_not_called()
+    assert created_schemas(client) == []
 
 
 def test_stream_namespace_maps_to_schema(client: MagicMock) -> None:
@@ -109,9 +117,9 @@ def test_stream_namespace_maps_to_schema(client: MagicMock) -> None:
         ("my_catalog", "AIRBYTE_TYPEFORM", "responses"),
         ("my_catalog", "AIRBYTE_TYPEFORM", "forms"),
     ]
-    client.execute.assert_called_once_with(
+    assert created_schemas(client) == [
         'CREATE SCHEMA IF NOT EXISTS "my_catalog"."AIRBYTE_TYPEFORM"'
-    )
+    ]
 
 
 def test_namespace_is_quoted_in_create_schema(client: MagicMock) -> None:
@@ -123,9 +131,9 @@ def test_namespace_is_quoted_in_create_schema(client: MagicMock) -> None:
     writer.buffer_record(make_record("forms", 1, 'my "ns"'))
     writer.flush()
 
-    client.execute.assert_called_once_with(
+    assert created_schemas(client) == [
         'CREATE SCHEMA IF NOT EXISTS "my_catalog"."my ""ns"""'
-    )
+    ]
 
 
 def test_same_stream_name_in_different_namespaces(client: MagicMock) -> None:
@@ -145,9 +153,9 @@ def test_same_stream_name_in_different_namespaces(client: MagicMock) -> None:
         ("my_catalog", "app_b", "users"),
     ]
     assert ingested_ids(client) == [[1], [2]]
-    assert client.execute.call_args_list == [
-        call('CREATE SCHEMA IF NOT EXISTS "my_catalog"."app_a"'),
-        call('CREATE SCHEMA IF NOT EXISTS "my_catalog"."app_b"'),
+    assert created_schemas(client) == [
+        'CREATE SCHEMA IF NOT EXISTS "my_catalog"."app_a"',
+        'CREATE SCHEMA IF NOT EXISTS "my_catalog"."app_b"',
     ]
 
 

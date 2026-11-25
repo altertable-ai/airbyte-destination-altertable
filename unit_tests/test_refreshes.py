@@ -15,7 +15,10 @@ from airbyte_cdk.models import (
 )
 from altertable_flightsql.client import IngestTableMode
 
-from destination_altertable.altertable_writer import AltertableWriter
+from destination_altertable.altertable_writer import (
+    AIRBYTE_META_SCHEMA,
+    AltertableWriter,
+)
 
 
 CONFIG = {
@@ -118,7 +121,7 @@ def test_clear_replaces_the_table_with_an_empty_one(client: MagicMock) -> None:
     assert client.ingest.call_args.kwargs["table_name"] == "users"
     [batch] = written_batches(client)
     assert batch.num_rows == 0
-    assert batch.schema.names == ["id", "name"]
+    assert batch.schema.names == ["id", "name", *AIRBYTE_META_SCHEMA.names]
 
 
 def test_complete_flushes_buffered_records(client: MagicMock) -> None:
