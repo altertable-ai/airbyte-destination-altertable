@@ -41,6 +41,19 @@ This page guides you through the process of setting up the [Altertable](https://
 
 Each stream is written to its own table within the configured catalog, in the schema matching its namespace (see [Namespace support](#namespace-support)). Columns are mapped from the source JSON schema to DuckDB types.
 
+Each table also has the [Airbyte metadata columns](https://docs.airbyte.com/platform/understanding-airbyte/airbyte-metadata-fields), after the stream columns:
+
+| Column                   | Type          | Description                                                                                       |
+| :----------------------- | :------------ | :------------------------------------------------------------------------------------------------ |
+| `_airbyte_raw_id`        | `VARCHAR`     | A UUID assigned to each record.                                                                   |
+| `_airbyte_extracted_at`  | `TIMESTAMPTZ` | When the source extracted the record.                                                             |
+| `_airbyte_meta`          | `JSON`        | The `sync_id` of the sync that wrote the record, and the `changes` the source made to its fields. |
+| `_airbyte_generation_id` | `BIGINT`      | The generation of the stream when the record was written.                                         |
+
+With Incremental - Append + Deduped, a record replacing an existing one also replaces its metadata, so `_airbyte_extracted_at` is the time the latest version of the record was extracted.
+
+Tables written by a version of this destination older than 0.2.0 get these columns on their next sync. Their previous rows have `NULL` metadata.
+
 ## Data type map
 
 Airbyte JSON Schema types are mapped to Altertable (DuckDB) types as follows:
@@ -74,7 +87,7 @@ This destination supports [refreshes](https://docs.airbyte.com/platform/operator
 - **Refresh and remove records** replaces the table when the first batch of reloaded records is written, so previous records are no longer available while the rest of the refresh runs.
 - **Clear** empties the table once the sync completes.
 
-Records are not tagged with an `_airbyte_generation_id` column.
+Records are tagged with their generation in the `_airbyte_generation_id` column, but refreshes replace the table instead of deleting the records of previous generations.
 
 ## Changelog
 
@@ -83,6 +96,7 @@ Records are not tagged with an `_airbyte_generation_id` column.
 
 | Version | Date       | Pull Request | Subject         |
 | :------ | :--------- | :----------- | :-------------- |
+| 0.2.0   | 2026-11-25 | [27](https://github.com/altertable-ai/airbyte-destination-altertable/pull/27) | Write the Airbyte metadata columns (`_airbyte_raw_id`, `_airbyte_extracted_at`, `_airbyte_meta`, `_airbyte_generation_id`) |
 | 0.1.6   | 2026-11-24 | [17](https://github.com/altertable-ai/airbyte-destination-altertable/pull/17) | Flush buffered records before the next checkpoint once they reach a size limit |
 | 0.1.5   | 2026-11-24 | [22](https://github.com/altertable-ai/airbyte-destination-altertable/pull/22) | Keep large integers exact in `number` columns |
 | 0.1.4   | 2026-11-24 | [21](https://github.com/altertable-ai/airbyte-destination-altertable/pull/21) | Reopen the Flight session when it expires during a sync |

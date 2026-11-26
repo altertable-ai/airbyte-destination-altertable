@@ -14,7 +14,10 @@ from airbyte_cdk.models import (
     SyncMode,
 )
 
-from destination_altertable.altertable_writer import AltertableWriter
+from destination_altertable.altertable_writer import (
+    AIRBYTE_META_SCHEMA,
+    AltertableWriter,
+)
 
 
 CONFIG = {
@@ -60,8 +63,11 @@ def make_writer() -> AltertableWriter:
 
 
 def written_batches(client: MagicMock) -> list[pa.RecordBatch]:
+    """Written batches, without the Airbyte metadata columns."""
     writer = client.ingest.return_value.__enter__.return_value
-    return [c.args[0] for c in writer.write_batch.call_args_list]
+    return [
+        c.args[0].select(["ad_id", "spend"]) for c in writer.write_batch.call_args_list
+    ]
 
 
 def buffer_and_flush(writer: AltertableWriter, rows: list[dict]) -> None:
@@ -119,7 +125,9 @@ def test_flush_keeps_number_column_types_of_previous_flushes(client: MagicMock) 
     buffer_and_flush(writer, [{"ad_id": None, "spend": 3}])
 
     schemas = [call.kwargs["schema"] for call in client.ingest.call_args_list]
-    schema = pa.schema([("ad_id", pa.int64()), ("spend", pa.float64())])
+    schema = pa.schema(
+        [("ad_id", pa.int64()), ("spend", pa.float64()), *AIRBYTE_META_SCHEMA]
+    )
     assert schemas == [schema] * 2
     assert [row for batch in written_batches(client) for row in batch.to_pylist()] == [
         {"ad_id": TIKTOK_AD_ID, "spend": 12.5},

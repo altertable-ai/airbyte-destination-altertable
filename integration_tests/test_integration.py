@@ -5,6 +5,7 @@ Uses ghcr.io/altertable-ai/altertable-mock to simulate the Altertable backend.
 """
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from airbyte_cdk.models import (
@@ -50,6 +51,7 @@ def make_configured_catalog(
     namespace: str | None = None,
     generation_id: int | None = None,
     minimum_generation_id: int | None = None,
+    sync_id: int | None = None,
 ) -> ConfiguredAirbyteCatalog:
     """Helper to create a ConfiguredAirbyteCatalog for testing."""
     return ConfiguredAirbyteCatalog(
@@ -69,6 +71,7 @@ def make_configured_catalog(
                 cursor_field=cursor_field,
                 generation_id=generation_id,
                 minimum_generation_id=minimum_generation_id,
+                sync_id=sync_id,
             )
         ]
     )
@@ -121,6 +124,16 @@ def query_table(client, catalog: str, schema: str, table: str) -> list[dict]:
     stream = client.query(f'SELECT * FROM "{catalog}"."{schema}"."{table}"')
     table_result = stream.read_all()
     return table_result.to_pylist()
+
+
+def column_types(client, catalog: str, schema: str, table: str) -> dict[str, str]:
+    """Return the DuckDB type of each column of a table."""
+    stream = client.query(f"""
+        SELECT column_name, data_type FROM information_schema.columns
+        WHERE table_catalog = '{catalog}' AND table_schema = '{schema}'
+            AND table_name = '{table}'
+    """)
+    return {r["column_name"]: r["data_type"] for r in stream.read_all().to_pylist()}
 
 
 class TestCheck:
@@ -517,3 +530,151 @@ class TestRefreshes:
         assert len(messages) == 1
 
         assert query_table(client, catalog_name, schema_name, table_name) == []
+
+
+class TestAirbyteMetadata:
+    """Test the Airbyte metadata columns written with every record."""
+
+    def test_existing_table_gets_metadata_columns(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that a table created without the metadata columns gets them, with
+        NULL for its previous rows."""
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.append,
+            json_schema=JSON_SCHEMA,
+            generation_id=3,
+            sync_id=42,
+        )
+        records = [
+            make_record_message(
+                table_name,
+                {"id": 10, "name": "New", "created_at": "2024-01-01T00:00:00Z"},
+                emitted_at=1764064800000,
+            ),
+            make_state_message(table_name),
+        ]
+
+        messages = list(destination.write(test_config, catalog, iter(records)))
+        assert len(messages) == 1
+
+        types = column_types(client, catalog_name, schema_name, table_name)
+        assert {name: types[name] for name in types if name.startswith("_airbyte")} == {
+            "_airbyte_raw_id": "VARCHAR",
+            "_airbyte_extracted_at": "TIMESTAMP WITH TIME ZONE",
+            "_airbyte_meta": "JSON",
+            "_airbyte_generation_id": "BIGINT",
+        }
+
+        stream = client.query(f"""
+            SELECT id, _airbyte_raw_id, _airbyte_extracted_at, _airbyte_generation_id,
+                json_extract(_airbyte_meta, '$.sync_id')::BIGINT AS sync_id
+            FROM "{catalog_name}"."{schema_name}"."{table_name}" ORDER BY id
+        """)
+        results = {r["id"]: r for r in stream.read_all().to_pylist()}
+        assert results[1] == {
+            "id": 1,
+            "_airbyte_raw_id": None,
+            "_airbyte_extracted_at": None,
+            "_airbyte_generation_id": None,
+            "sync_id": None,
+        }
+        new = results[10]
+        assert uuid.UUID(new["_airbyte_raw_id"])
+        assert new["_airbyte_extracted_at"] == datetime(
+            2025, 11, 25, 10, 0, tzinfo=timezone.utc
+        )
+        assert new["_airbyte_generation_id"] == 3
+        assert new["sync_id"] == 42
+
+    def test_new_table_has_metadata_columns(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that a replaced table is created with the metadata columns."""
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.overwrite,
+            json_schema=JSON_SCHEMA,
+            generation_id=1,
+            sync_id=7,
+        )
+        records = [
+            make_record_message(
+                table_name,
+                {"id": 10, "name": "New", "created_at": "2024-01-01T00:00:00Z"},
+            ),
+            make_state_message(table_name),
+            make_record_message(
+                table_name,
+                {"id": 11, "name": "Newer", "created_at": "2024-01-01T00:00:00Z"},
+            ),
+            make_state_message(table_name),
+        ]
+
+        messages = list(destination.write(test_config, catalog, iter(records)))
+        assert len(messages) == 2
+
+        # The mock creates `arrow.json` columns as VARCHAR, so only the values are checked.
+        stream = client.query(f"""
+            SELECT id, _airbyte_generation_id,
+                json_extract(_airbyte_meta, '$.sync_id')::BIGINT AS sync_id
+            FROM "{catalog_name}"."{schema_name}"."{table_name}" ORDER BY id
+        """)
+        assert stream.read_all().to_pylist() == [
+            {"id": 10, "_airbyte_generation_id": 1, "sync_id": 7},
+            {"id": 11, "_airbyte_generation_id": 1, "sync_id": 7},
+        ]
+
+    def test_dedup_updates_extracted_at(
+        self, destination, altertable_service, client, data
+    ):
+        """Test that a deduplicated record keeps the extraction time of its latest sync."""
+        catalog_name, schema_name, table_name = data
+        test_config = {
+            **altertable_service,
+            "catalog": catalog_name,
+            "schema": schema_name,
+        }
+
+        catalog = make_configured_catalog(
+            stream_name=table_name,
+            destination_sync_mode=DestinationSyncMode.append_dedup,
+            json_schema=JSON_SCHEMA,
+            primary_key=PRIMARY_KEY,
+            cursor_field=CURSOR_FIELD,
+            source_defined_cursor=True,
+        )
+        for emitted_at, created_at in (
+            (1764064800000, "2024-01-01T00:00:00Z"),
+            (1764068400000, "2024-01-02T00:00:00Z"),
+        ):
+            records = [
+                make_record_message(
+                    table_name,
+                    {"id": 1, "name": "Synced", "created_at": created_at},
+                    emitted_at=emitted_at,
+                ),
+                make_state_message(table_name),
+            ]
+            list(destination.write(test_config, catalog, iter(records)))
+
+        results = query_table(client, catalog_name, schema_name, table_name)
+        [synced] = [r for r in results if r["id"] == 1]
+        assert synced["_airbyte_extracted_at"] == datetime(
+            2025, 11, 25, 11, 0, tzinfo=timezone.utc
+        )

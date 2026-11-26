@@ -1,3 +1,5 @@
+import json
+import uuid
 from dataclasses import dataclass, field
 from logging import getLogger
 from pathlib import Path
@@ -12,6 +14,7 @@ from airbyte_cdk.models import (
     ConfiguredAirbyteStream,
     DestinationSyncMode,
 )
+from airbyte_cdk.models.airbyte_protocol import AirbyteRecordMessageMetaChange
 
 from .type_conversion import (
     convert_number_column,
@@ -37,6 +40,24 @@ def is_session_expired(exc: BaseException) -> bool:
 
 def quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
+
+
+# Airbyte metadata columns, written after the data columns: appends match columns by
+# position, and existing tables get them at the end with ALTER TABLE ADD COLUMN.
+AIRBYTE_META_SCHEMA = pa.schema(
+    [
+        ("_airbyte_raw_id", pa.string()),
+        ("_airbyte_extracted_at", pa.timestamp("us", tz="UTC")),
+        ("_airbyte_meta", pa.json_()),
+        ("_airbyte_generation_id", pa.int64()),
+    ]
+)
+AIRBYTE_META_SQL_TYPES = {
+    "_airbyte_raw_id": "VARCHAR",
+    "_airbyte_extracted_at": "TIMESTAMPTZ",
+    "_airbyte_meta": "JSON",
+    "_airbyte_generation_id": "BIGINT",
+}
 
 
 # Records are converted to Arrow in chunks of at most this many rows or string
@@ -88,6 +109,8 @@ class AirbyteStream:
     truncate: bool
     primary_key: list[str] = field(default_factory=list)
     cursor_field: list[str] = field(default_factory=list)
+    sync_id: Optional[int] = None
+    generation_id: int = 0
 
     @property
     def arrow_schema(self) -> pa.Schema:
@@ -96,8 +119,28 @@ class AirbyteStream:
         Arrow types only depend on the JSON schema, except for number columns.
         """
         return pa.schema(
-            (name, convert_to_arrow(None, prop)[0])
-            for name, prop in self.properties.items()
+            [
+                (name, convert_to_arrow(None, prop)[0])
+                for name, prop in self.properties.items()
+            ]
+            + list(AIRBYTE_META_SCHEMA)
+        )
+
+    def airbyte_meta(
+        self, changes: Optional[list[AirbyteRecordMessageMetaChange]]
+    ) -> str:
+        return json.dumps(
+            {
+                "sync_id": self.sync_id,
+                "changes": [
+                    {
+                        "field": change.field,
+                        "change": change.change.value,
+                        "reason": change.reason.value,
+                    }
+                    for change in changes or []
+                ],
+            }
         )
 
 
@@ -105,6 +148,7 @@ class StreamBuffer:
     """Records of a stream, converted to Arrow as they are buffered."""
 
     def __init__(self, stream: AirbyteStream):
+        self.stream = stream
         self.properties = stream.properties
         self.schema = stream.arrow_schema
         self.batches: list[pa.RecordBatch] = []
@@ -112,8 +156,10 @@ class StreamBuffer:
         self._number_columns = {
             name for name, prop in self.properties.items() if is_number_column(prop)
         }
+        # Records rarely have changes, so their meta is usually the same.
+        self._meta_without_changes = stream.airbyte_meta(None)
         self._batches_bytes = 0
-        self._columns: dict[str, list] = {name: [] for name in self.properties}
+        self._columns: dict[str, list] = {name: [] for name in self.schema.names}
         self._pending_rows = 0
         self._pending_bytes = 0
 
@@ -122,9 +168,10 @@ class StreamBuffer:
         """Arrow size of the converted records plus string size of the pending ones."""
         return self._batches_bytes + self._pending_bytes
 
-    def append(self, data: dict[str, Any]) -> int:
+    def append(self, record: AirbyteRecordMessage) -> int:
         """Buffer a record, returning the number of bytes it added to the buffer."""
         nbytes = self.nbytes
+        data = record.data
         for name, prop in self.properties.items():
             value = data.get(name)
             if name not in self._number_columns:
@@ -133,6 +180,16 @@ class StreamBuffer:
             # Strings make records large, every other type is fixed width.
             if isinstance(value, str):
                 self._pending_bytes += len(value)
+        raw_id = str(uuid.uuid4())
+        changes = record.meta.changes if record.meta else None
+        meta = (
+            self.stream.airbyte_meta(changes) if changes else self._meta_without_changes
+        )
+        self._columns["_airbyte_raw_id"].append(raw_id)
+        self._columns["_airbyte_extracted_at"].append(int(record.emitted_at * 1000))
+        self._columns["_airbyte_meta"].append(meta)
+        self._columns["_airbyte_generation_id"].append(self.stream.generation_id)
+        self._pending_bytes += len(raw_id) + len(meta)
         self._pending_rows += 1
         if (
             self._pending_rows >= ROWS_PER_CHUNK
@@ -154,7 +211,7 @@ class StreamBuffer:
         batch = pa.RecordBatch.from_arrays(arrays, names=self.schema.names)
         self.batches.append(batch)
         self._batches_bytes += batch.nbytes
-        self._columns = {name: [] for name in self.properties}
+        self._columns = {name: [] for name in self.schema.names}
         self._pending_rows = 0
         self._pending_bytes = 0
 
@@ -177,6 +234,7 @@ class AltertableWriter:
         self.streams: Dict[StreamKey, AirbyteStream] = {}
         self._replaced_streams: set[StreamKey] = set()
         self._created_schemas: set[str] = set()
+        self._migrated_streams: set[StreamKey] = set()
         self._written_schemas: Dict[StreamKey, pa.Schema] = {}
 
     def __enter__(self):
@@ -230,7 +288,13 @@ class AltertableWriter:
                 (stream.stream.namespace, stream.stream.name): AirbyteStream(
                     name=stream.stream.name,
                     namespace=stream.stream.namespace,
-                    properties=stream.stream.json_schema["properties"],
+                    properties={
+                        name: prop
+                        for name, prop in stream.stream.json_schema[
+                            "properties"
+                        ].items()
+                        if name not in AIRBYTE_META_SCHEMA.names
+                    },
                     sync_mode=stream.destination_sync_mode,
                     truncate=self._is_truncate(stream),
                     primary_key=self._get_primary_key(
@@ -239,6 +303,8 @@ class AltertableWriter:
                     cursor_field=stream.cursor_field
                     or stream.stream.source_defined_cursor
                     or [],
+                    sync_id=stream.sync_id,
+                    generation_id=stream.generation_id or 0,
                 )
                 for stream in catalog.streams
             }
@@ -252,7 +318,7 @@ class AltertableWriter:
         stream_key = (record.namespace, record.stream)
         if (buffer := self.buffer.get(stream_key)) is None:
             buffer = self.buffer[stream_key] = StreamBuffer(self.streams[stream_key])
-        self.buffered_bytes += buffer.append(record.data)
+        self.buffered_bytes += buffer.append(record)
 
     def should_flush(self) -> bool:
         return self.buffered_bytes >= self.flush_threshold
@@ -298,18 +364,39 @@ class AltertableWriter:
     def _get_schema_name(self, stream_config: AirbyteStream) -> str:
         return stream_config.namespace or self.config.get("schema", "")
 
+    def _qualified_name(self, *identifiers: str) -> str:
+        catalog_name = self.config.get("catalog", "")
+        if catalog_name:
+            identifiers = (catalog_name, *identifiers)
+        return ".".join(quote_identifier(identifier) for identifier in identifiers)
+
     def _ensure_schema(self, schema_name: str):
         if schema_name in self._created_schemas:
             return
 
-        catalog_name = self.config.get("catalog", "")
-        qualified_name = quote_identifier(schema_name)
-        if catalog_name:
-            qualified_name = f"{quote_identifier(catalog_name)}.{qualified_name}"
+        qualified_name = self._qualified_name(schema_name)
         self._with_session_retry(
             lambda: self.client.execute(f"CREATE SCHEMA IF NOT EXISTS {qualified_name}")
         )
         self._created_schemas.add(schema_name)
+
+    def _ensure_airbyte_columns(
+        self, stream_key: StreamKey, stream_config: AirbyteStream
+    ):
+        """Add the Airbyte metadata columns to a table written before they existed."""
+        if stream_key in self._migrated_streams:
+            return
+
+        table_name = self._qualified_name(
+            self._get_schema_name(stream_config), stream_config.name
+        )
+        for column, sql_type in AIRBYTE_META_SQL_TYPES.items():
+            statement = (
+                f"ALTER TABLE IF EXISTS {table_name} "
+                f"ADD COLUMN IF NOT EXISTS {quote_identifier(column)} {sql_type}"
+            )
+            self._with_session_retry(lambda: self.client.execute(statement))
+        self._migrated_streams.add(stream_key)
 
     def _get_incremental_options(
         self, stream_config: AirbyteStream
@@ -353,6 +440,9 @@ class AltertableWriter:
         # The configured schema is expected to exist, namespaces are created on demand.
         if stream_config.namespace:
             self._ensure_schema(schema_name)
+        # A replaced table is recreated with the metadata columns.
+        if mode != IngestTableMode.REPLACE:
+            self._ensure_airbyte_columns(stream_key, stream_config)
 
         def write():
             with self.client.ingest(
@@ -370,6 +460,7 @@ class AltertableWriter:
 
         if mode == IngestTableMode.REPLACE:
             self._replaced_streams.add(stream_key)
+            self._migrated_streams.add(stream_key)
 
     def _cast_to_written_schema(
         self, stream_key: StreamKey, batches: list[pa.RecordBatch]

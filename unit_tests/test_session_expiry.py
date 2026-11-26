@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Generator
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pyarrow as pa
 import pyarrow.flight as flight
@@ -133,7 +133,7 @@ def test_expired_session_reopens_and_retries_schema_creation(
 
     assert len(clients) == 2
     renewed = clients[1]
-    renewed.execute.assert_called_once_with(
+    assert renewed.execute.call_args_list[0] == call(
         'CREATE SCHEMA IF NOT EXISTS "my_catalog"."sales"'
     )
     renewed.ingest.assert_called_once()
